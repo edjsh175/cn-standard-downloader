@@ -1,0 +1,21 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境
+venv/
+env/
+.env
+
+# 编译器/IDE 配置文件
+.idea/
+.vscode/
+
+# 下载的 PDF 文件夹（假设你代码里下载的文件都存在 downloads 文件夹里）
+# 如果你的文件夹叫别的名字，比如 pdf_files，请自行替换
+downloads/
+*.pdf
+
+# 依赖日志
+*.log
