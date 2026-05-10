@@ -55,6 +55,15 @@ class TaskWorkerService:
             normalized.append(canonical)
         return normalized
 
+    @staticmethod
+    def _normalize_duplicate_policy(value):
+        if value is None:
+            return "overwrite"
+        normalized = str(value).strip().lower()
+        if normalized not in {"overwrite", "skip"}:
+            raise ValueError("duplicate_policy must be overwrite or skip")
+        return normalized
+
     def submit_task(self, payload: dict):
         task_type = payload.get("task_type")
         if task_type not in {"keyword_search", "direct_grab"}:
@@ -62,6 +71,7 @@ class TaskWorkerService:
 
         table_name = validate_table_name(payload.get("table_name"))
         payload["table_name"] = table_name
+        payload["duplicate_policy"] = self._normalize_duplicate_policy(payload.get("duplicate_policy"))
 
         if task_type == "keyword_search":
             keywords = payload.get("keywords")

@@ -81,6 +81,7 @@ class PipelineRunner:
 
         success_count = 0
         failure_count = 0
+        write_counts = {"inserted": 0, "updated": 0, "skipped": 0, "failed": 0}
         errors = []
 
         for item in items:
@@ -88,10 +89,12 @@ class PipelineRunner:
             saved = saved_results.get(detail_url) or {}
             meta = saved.get("meta") or item
             pdf_path = saved.get("pdf_path")
+            write_result = saved.get("write_result") or {}
             failure = unique_failures.get(detail_url)
 
             if failure:
                 failure_count += 1
+                write_counts["failed"] += 1
                 errors.append(
                     {
                         "detail_url": detail_url,
@@ -110,15 +113,19 @@ class PipelineRunner:
                 )
             elif detail_url in saved_results:
                 success_count += 1
+                item_status = str(write_result.get("status") or "succeeded")
+                if item_status in write_counts:
+                    write_counts[item_status] += 1
                 self.task_store.update_task_item(
                     task_id,
                     detail_url,
-                    item_status="succeeded",
+                    item_status=item_status,
                     pdf_path=pdf_path,
                     meta_payload=meta,
                 )
             else:
                 failure_count += 1
+                write_counts["failed"] += 1
                 message = "No database write record captured for this item"
                 errors.append(
                     {
@@ -136,7 +143,7 @@ class PipelineRunner:
                     meta_payload=meta,
                 )
 
-        return success_count, failure_count, errors
+        return success_count, failure_count, write_counts, errors
 
     def _summarize_downloads(self, items, download_summaries):
         relevant = []
@@ -230,6 +237,9 @@ class PipelineRunner:
                 "task_id": task_id,
                 "status": "succeeded",
                 "summary": {"total": 0, "succeeded": 0, "failed": 0, "skipped": 0},
+                "inserted": 0,
+                "updated": 0,
+                "skipped": 0,
                 "search_summary": search_summary,
                 "artifacts": {
                     "search_results": search_output if os.path.exists(search_output) else None,
@@ -238,7 +248,16 @@ class PipelineRunner:
                     "pdf_dir": overrides["pdf_dir"],
                     "debug_dir": overrides["debug_dir"],
                 },
-                "db_write_summary": {"table_name": payload["table_name"]},
+                "db_write_summary": {
+                    "table_name": payload["table_name"],
+                    "duplicate_policy": payload.get("duplicate_policy", "overwrite"),
+                    "task_items": 0,
+                    "saved_items": 0,
+                    "inserted": 0,
+                    "updated": 0,
+                    "skipped": 0,
+                    "failed": 0,
+                },
                 "download_summary": {
                     "total_items": 0,
                     "tracked_items": 0,
@@ -254,16 +273,19 @@ class PipelineRunner:
         crawler = BatchCrawler(
             log_file=task_log,
             cancel_checker=lambda: self.task_store.is_cancel_requested(task_id),
+            duplicate_policy=payload.get("duplicate_policy", "overwrite"),
         )
         original_save_db = crawler.save_db
         saved_results: dict[str, dict[str, Any]] = {}
 
         def tracked_save_db(meta, path, table_name=payload["table_name"]):
             saved = original_save_db(meta, path, table_name)
-            if saved:
+            if saved and saved.get("status") in {"inserted", "updated", "skipped"}:
+                meta["write_result"] = dict(saved)
                 saved_results[meta.get("detail_url")] = {
                     "meta": dict(meta),
                     "pdf_path": path,
+                    "write_result": dict(saved),
                 }
             return saved
 
@@ -288,7 +310,7 @@ class PipelineRunner:
             self._finalize_task_items(task_id, items, saved_results, crawler.failed_items)
             raise
 
-        success_count, failure_count, errors = self._finalize_task_items(
+        success_count, failure_count, write_counts, errors = self._finalize_task_items(
             task_id,
             items,
             saved_results,
@@ -311,8 +333,11 @@ class PipelineRunner:
                 "total": len(items),
                 "succeeded": success_count,
                 "failed": failure_count,
-                "skipped": 0,
+                "skipped": write_counts["skipped"],
             },
+            "inserted": write_counts["inserted"],
+            "updated": write_counts["updated"],
+            "skipped": write_counts["skipped"],
             "search_summary": search_summary,
             "artifacts": {
                 "search_results": search_output if os.path.exists(search_output) else None,
@@ -323,8 +348,13 @@ class PipelineRunner:
             },
             "db_write_summary": {
                 "table_name": payload["table_name"],
+                "duplicate_policy": payload.get("duplicate_policy", "overwrite"),
                 "task_items": len(items),
-                "saved_items": len(saved_results),
+                "saved_items": write_counts["inserted"] + write_counts["updated"],
+                "inserted": write_counts["inserted"],
+                "updated": write_counts["updated"],
+                "skipped": write_counts["skipped"],
+                "failed": write_counts["failed"],
             },
             "download_summary": download_summary,
             "errors": errors,

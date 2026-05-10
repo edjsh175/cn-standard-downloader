@@ -358,6 +358,7 @@ class StandardCrawlerGUI:
         # 初始化变量
         self.table_names = []
         self.selected_table = tk.StringVar()
+        self.duplicate_policy_var = tk.StringVar(value="覆盖更新（默认）")
         self.db_connected = False
         # 跟踪当前运行的线程和crawler实例
         self.current_threads = []
@@ -559,6 +560,31 @@ class StandardCrawlerGUI:
             foreground="#E74C3C"
         )
         self.db_status_label.grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
+
+        ttk.Label(
+            db_frame,
+            text="重复数据处理：",
+            font=self.title_font,
+            style="Title.TLabel"
+        ).grid(row=1, column=0, padx=5, pady=(8, 5), sticky=tk.E)
+
+        self.duplicate_policy_combobox = ttk.Combobox(
+            db_frame,
+            textvariable=self.duplicate_policy_var,
+            width=18,
+            font=self.font,
+            state="readonly",
+            values=["覆盖更新（默认）", "跳过已存在"],
+        )
+        self.duplicate_policy_combobox.grid(row=1, column=1, padx=5, pady=(8, 5), sticky=tk.W)
+        self.duplicate_policy_combobox.set("覆盖更新（默认）")
+
+        ttk.Label(
+            db_frame,
+            text="覆盖更新会写入新值；跳过已存在不会覆盖旧记录",
+            font=("微软雅黑", 9),
+            foreground="#7F8C8D"
+        ).grid(row=1, column=2, padx=5, pady=(8, 5), sticky=tk.W)
 
         url_frame = ttk.LabelFrame(self.main_frame, text="URL 批量抓取", padding="10")
         url_frame.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky=tk.NSEW)
@@ -1167,6 +1193,24 @@ class StandardCrawlerGUI:
             return None
         return table_name
 
+    def get_duplicate_policy(self):
+        raw_value = self.duplicate_policy_var.get().strip()
+        policy_mapping = {
+            "覆盖更新（默认）": "overwrite",
+            "跳过已存在": "skip",
+            "overwrite": "overwrite",
+            "skip": "skip",
+        }
+        policy = policy_mapping.get(raw_value)
+        if not policy:
+            messagebox.showwarning("输入错误", "重复数据处理必须是 overwrite 或 skip")
+            return None
+        return policy
+
+    @staticmethod
+    def format_duplicate_policy_label(policy):
+        return "覆盖更新" if policy == "overwrite" else "跳过已存在"
+
     def _start_task_thread(self, target, *args):
         task_thread = threading.Thread(target=target, args=args)
         task_thread.daemon = False
@@ -1210,6 +1254,19 @@ class StandardCrawlerGUI:
             f"成功：{crawl_result.get('succeeded', 0)}",
             f"失败：{crawl_result.get('failed', 0)}",
         ]
+        write_summary = crawl_result.get("write_summary") or crawl_result.get("db_write_summary") or {}
+        if write_summary:
+            lines.extend(
+                [
+                    f"新增：{write_summary.get('inserted', crawl_result.get('inserted', 0))}",
+                    f"更新：{write_summary.get('updated', crawl_result.get('updated', 0))}",
+                    f"跳过：{write_summary.get('skipped', crawl_result.get('skipped', 0))}",
+                ]
+            )
+            if write_summary.get("duplicate_policy") == "skip":
+                lines.append("提示：已存在数据已跳过，未覆盖旧记录")
+            elif write_summary.get("duplicate_policy") == "overwrite":
+                lines.append("提示：已存在数据按覆盖更新处理")
         failed_output = crawl_result.get("failed_output_file")
         if failed_output:
             lines.append(f"失败清单：{failed_output}")
@@ -1257,6 +1314,10 @@ class StandardCrawlerGUI:
         if not table_name:
             return
 
+        duplicate_policy = self.get_duplicate_policy()
+        if not duplicate_policy:
+            return
+
         original_text = self.full_process_btn.cget("text")
         self.full_process_btn.config(text="搜索中...", state=tk.DISABLED)
         self._start_task_thread(
@@ -1264,10 +1325,11 @@ class StandardCrawlerGUI:
             keywords,
             per_keyword_limit,
             table_name,
+            duplicate_policy,
             original_text,
         )
 
-    def _execute_full_process_search(self, keywords, per_keyword_limit, table_name, original_text):
+    def _execute_full_process_search(self, keywords, per_keyword_limit, table_name, duplicate_policy, original_text):
         try:
             print("=" * 80)
             print("开始完整流程")
@@ -1283,6 +1345,7 @@ class StandardCrawlerGUI:
                     keywords,
                     per_keyword_limit,
                     table_name,
+                    duplicate_policy,
                     original_text,
                     search_result,
                 ),
@@ -1298,14 +1361,17 @@ class StandardCrawlerGUI:
                 ),
             )
 
-    def _handle_full_process_search_result(self, keywords, per_keyword_limit, table_name, original_text, search_result):
+    def _handle_full_process_search_result(self, keywords, per_keyword_limit, table_name, duplicate_policy, original_text, search_result):
         if not search_result.get("records"):
             self.full_process_btn.config(text=original_text, state=tk.NORMAL)
             self._show_info_with_toast("搜索完成", self._format_search_summary_message(search_result), "无可抓取结果")
             return
 
         confirm_message = self._format_search_summary_message(search_result)
-        should_continue = messagebox.askyesno("确认下载", f"{confirm_message}\n\n是否继续下载并入库？")
+        should_continue = messagebox.askyesno(
+            "确认下载",
+            f"{confirm_message}\n重复策略：{self.format_duplicate_policy_label(duplicate_policy)}\n\n是否继续下载并入库？",
+        )
         if not should_continue:
             print("用户取消了后续下载")
             self.full_process_btn.config(text=original_text, state=tk.NORMAL)
@@ -1317,16 +1383,18 @@ class StandardCrawlerGUI:
             self._execute_full_process_crawl,
             keywords,
             table_name,
+            duplicate_policy,
             search_result,
             original_text,
         )
 
-    def _execute_full_process_crawl(self, keywords, table_name, search_result, original_text):
+    def _execute_full_process_crawl(self, keywords, table_name, duplicate_policy, search_result, original_text):
         try:
             crawl_result = self._run_crawler_with_table(
                 table_name=table_name,
                 excel_file=search_result["output_file"],
                 failed_keywords=keywords,
+                duplicate_policy=duplicate_policy,
             )
             print("\n完整流程执行完成")
             result_message = self._format_crawl_summary_message(crawl_result)
@@ -1381,6 +1449,10 @@ class StandardCrawlerGUI:
         if not table_name:
             return
 
+        duplicate_policy = self.get_duplicate_policy()
+        if not duplicate_policy:
+            return
+
         file_path = filedialog.askopenfilename(
             title="选择待抓取 Excel 文件",
             filetypes=[("Excel文件", "*.xlsx"), ("所有文件", "*.*")],
@@ -1390,10 +1462,10 @@ class StandardCrawlerGUI:
 
         original_text = self.only_grab_btn.cget("text")
         self.only_grab_btn.config(text="处理中...", state=tk.DISABLED)
-        self._start_task_thread(self._execute_only_grab, table_name, file_path, original_text)
+        self._start_task_thread(self._execute_only_grab, table_name, duplicate_policy, file_path, original_text)
 
-    def _run_crawler_with_table(self, table_name, excel_file, failed_keywords=None):
-        crawler = BatchCrawler()
+    def _run_crawler_with_table(self, table_name, excel_file, failed_keywords=None, duplicate_policy="overwrite"):
+        crawler = BatchCrawler(duplicate_policy=duplicate_policy)
         self.current_crawler = crawler
         original_save_db = crawler.save_db
 
@@ -1407,7 +1479,7 @@ class StandardCrawlerGUI:
             failed_keywords=failed_keywords,
         )
 
-    def _run_crawler_with_items(self, table_name, items, failed_keywords=None):
+    def _run_crawler_with_items(self, table_name, items, failed_keywords=None, duplicate_policy="overwrite"):
         temp_dir = os.path.join(get_base_dir(), ".tmp", "gui_direct_url")
         os.makedirs(temp_dir, exist_ok=True)
         temp_file = None
@@ -1426,6 +1498,7 @@ class StandardCrawlerGUI:
                 table_name=table_name,
                 excel_file=temp_file,
                 failed_keywords=failed_keywords,
+                duplicate_policy=duplicate_policy,
             )
         finally:
             if temp_handle and not temp_handle.closed:
@@ -1445,9 +1518,14 @@ class StandardCrawlerGUI:
         if not table_name:
             return
 
+        duplicate_policy = self.get_duplicate_policy()
+        if not duplicate_policy:
+            return
+
         confirm_message = (
             f"识别到 {len(detail_urls)} 个有效详情页 URL。\n\n"
-            f"首个链接：{detail_urls[0]}\n\n"
+            f"首个链接：{detail_urls[0]}\n"
+            f"重复策略：{self.format_duplicate_policy_label(duplicate_policy)}\n\n"
             "是否继续抓取并入库？"
         )
         if not messagebox.askyesno("确认 URL 批量抓取", confirm_message):
@@ -1459,11 +1537,12 @@ class StandardCrawlerGUI:
         self._start_task_thread(
             self._execute_url_batch_grab,
             table_name,
+            duplicate_policy,
             items,
             original_text,
         )
 
-    def _execute_url_batch_grab(self, table_name, items, original_text):
+    def _execute_url_batch_grab(self, table_name, duplicate_policy, items, original_text):
         try:
             print("=" * 80)
             print("开始 URL 批量抓取模式")
@@ -1473,6 +1552,7 @@ class StandardCrawlerGUI:
                 table_name=table_name,
                 items=items,
                 failed_keywords=["direct_url"],
+                duplicate_policy=duplicate_policy,
             )
             result_message = self._format_crawl_summary_message(crawl_result)
             self.root.after(
@@ -1487,7 +1567,7 @@ class StandardCrawlerGUI:
             self.current_crawler = None
             self.root.after(0, lambda: self.url_batch_btn.config(text=original_text, state=tk.NORMAL))
 
-    def _execute_only_grab(self, table_name, file_path, original_text):
+    def _execute_only_grab(self, table_name, duplicate_policy, file_path, original_text):
         try:
             print("=" * 80)
             print("开始仅抓取模式")
@@ -1498,6 +1578,7 @@ class StandardCrawlerGUI:
                 table_name=table_name,
                 excel_file=file_path,
                 failed_keywords=keywords,
+                duplicate_policy=duplicate_policy,
             )
             result_message = self._format_crawl_summary_message(crawl_result)
             self.root.after(

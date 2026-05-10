@@ -73,13 +73,15 @@ class BatchCrawler:
         r"\b(?:[A-Z]{2,3})(?:/[A-Z])?(?:\s*[A-Z])?\s*\d[\dA-Z.\-\/ ]{1,40}\d\b"
     )
 
-    def __init__(self, log_file=None, cancel_checker=None):
+    def __init__(self, log_file=None, cancel_checker=None, duplicate_policy="overwrite"):
         self.logger = init_logger(log_file or "s2_all_standard_db_adapt.log")
         self.cancel_checker = cancel_checker
+        self.duplicate_policy = duplicate_policy if duplicate_policy in {"overwrite", "skip"} else "overwrite"
         self.WAIT_TIME = ELEMENT_TIMEOUT
         self.current_code = ""
         self.failed_items = []
         self.download_summaries = {}
+        self.write_results = {}
         self.setup_env()
         self.cjy = Chaojiying_Client(CHAOJIYING_USER, CHAOJIYING_PASS, CHAOJIYING_SOFT_ID)
 
@@ -314,11 +316,26 @@ class BatchCrawler:
         succeeded_count = max(int(total_items) - failed_count, 0)
         tracked_downloads = list(self.download_summaries.values())
         resolved_failed_output = os.path.abspath(failed_output_file) if failed_output_file else None
+        write_results = [result for result in self.write_results.values() if result]
+        inserted_count = sum(1 for result in write_results if result.get("status") == "inserted")
+        updated_count = sum(1 for result in write_results if result.get("status") == "updated")
+        skipped_count = sum(1 for result in write_results if result.get("status") == "skipped")
         return {
             "total": int(total_items),
             "succeeded": succeeded_count,
             "failed": failed_count,
+            "inserted": inserted_count,
+            "updated": updated_count,
+            "skipped": skipped_count,
             "failed_output_file": resolved_failed_output,
+            "write_summary": {
+                "total_items": int(total_items),
+                "inserted": inserted_count,
+                "updated": updated_count,
+                "skipped": skipped_count,
+                "failed": failed_count,
+                "duplicate_policy": self.duplicate_policy,
+            },
             "download_summary": {
                 "total_items": int(total_items),
                 "tracked_items": len(tracked_downloads),
@@ -350,7 +367,119 @@ class BatchCrawler:
                 results[key] = None
         return results
 
+    def _build_db_params(self, meta, path):
+        return (
+            meta["code"],
+            meta.get("keyword") or "无",
+            meta.get("draft_unit") or "无",
+            meta.get("drafter") or "无",
+            meta.get("name") or "无",
+            meta.get("english_name") or "无",
+            meta.get("release_date") or None,
+            meta.get("implement_date") or None,
+            meta.get("release_unit") or "无",
+            meta.get("charge_unit") or "无",
+            meta.get("replace_standard") or "无",
+            meta.get("status") or "现行",
+            meta.get("application_scope") or "无",
+            meta.get("reference_standard") or "无",
+            path or "无",
+            meta.get("ps") or "无",
+        )
+
+    def _existing_standard_row(self, table_name, standard_code):
+        sql = f"SELECT id FROM `{table_name}` WHERE standard_code=%s LIMIT 1"
+        self.cursor.execute(sql, (standard_code,))
+        return self.cursor.fetchone()
+
     def save_db(self, m, path, table_name="standard_norm_detail"):
+        validated_table_name = validate_table_name(table_name)
+        standard_code = clean_text(m.get("code"))
+        detail_url = m.get("detail_url")
+        if not standard_code:
+            result = {
+                "status": "failed",
+                "standard_code": "",
+                "detail_url": detail_url,
+                "message": "standard_code missing",
+            }
+            if detail_url:
+                self.write_results[detail_url] = result
+            self._add_failed_item(m, "database write failed: standard_code missing")
+            return result
+
+        insert_sql = f"""INSERT INTO `{validated_table_name}`
+        (standard_code, keyword, draft_unit, drafter, chinese_name, english_name, release_date, implement_date,
+         release_unit, charge_unit, replace_standard, standard_status, application_scope, reference_standard,
+         pdf_path, ps)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
+        update_sql = f"""UPDATE `{validated_table_name}` SET
+            keyword=%s,
+            draft_unit=%s,
+            drafter=%s,
+            chinese_name=%s,
+            english_name=%s,
+            release_date=%s,
+            implement_date=%s,
+            release_unit=%s,
+            charge_unit=%s,
+            replace_standard=%s,
+            standard_status=%s,
+            application_scope=%s,
+            reference_standard=%s,
+            pdf_path=%s,
+            ps=%s
+        WHERE standard_code=%s"""
+        insert_params = self._build_db_params(m, path)
+        update_params = insert_params[1:] + (standard_code,)
+
+        try:
+            existing = self._existing_standard_row(validated_table_name, standard_code)
+            if existing and self.duplicate_policy == "skip":
+                result = {
+                    "status": "skipped",
+                    "standard_code": standard_code,
+                    "detail_url": detail_url,
+                    "message": "record already exists and was skipped",
+                }
+                if detail_url:
+                    self.write_results[detail_url] = result
+                return result
+
+            if existing:
+                self.cursor.execute(update_sql, update_params)
+                status = "updated"
+                message = "existing record updated"
+            else:
+                self.cursor.execute(insert_sql, insert_params)
+                status = "inserted"
+                message = "new record inserted"
+
+            self.db.commit()
+            result = {
+                "status": status,
+                "standard_code": standard_code,
+                "detail_url": detail_url,
+                "message": message,
+            }
+            if detail_url:
+                self.write_results[detail_url] = result
+            return result
+        except Exception as exc:
+            self.db.rollback()
+            self.logger.error(f"database write failed: {exc}")
+            message = f"database write failed: {str(exc)[:80]}"
+            self._add_failed_item(m, message)
+            result = {
+                "status": "failed",
+                "standard_code": standard_code,
+                "detail_url": detail_url,
+                "message": message,
+            }
+            if detail_url:
+                self.write_results[detail_url] = result
+            return result
+
         validated_table_name = validate_table_name(table_name)
         draft_unit_val = m.get("draft_unit") or "无"
         drafter_val = m.get("drafter") or "无"
