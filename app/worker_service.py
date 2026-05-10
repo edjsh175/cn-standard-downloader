@@ -9,6 +9,7 @@ import config
 from app.db_utils import validate_table_name
 from app.pipeline import PipelineRunner
 from app.task_store import TaskStore
+from utils import extract_detail_urls_from_text, normalize_detail_url
 
 
 class TaskWorkerService:
@@ -35,6 +36,25 @@ class TaskWorkerService:
             raise ValueError("per_keyword_limit must be a positive integer")
         return normalized
 
+    @staticmethod
+    def _normalize_detail_urls(detail_urls):
+        if detail_urls is None:
+            return []
+        if not isinstance(detail_urls, list):
+            raise ValueError("detail_urls must be a list of strings")
+
+        normalized = []
+        seen = set()
+        for index, raw_url in enumerate(detail_urls, 1):
+            canonical = normalize_detail_url(raw_url)
+            if not canonical:
+                raise ValueError(f"detail_urls item #{index} is not a supported detail url")
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            normalized.append(canonical)
+        return normalized
+
     def submit_task(self, payload: dict):
         task_type = payload.get("task_type")
         if task_type not in {"keyword_search", "direct_grab"}:
@@ -52,8 +72,27 @@ class TaskWorkerService:
 
         if task_type == "direct_grab":
             items = payload.get("items")
-            if not isinstance(items, list) or not items:
-                raise ValueError("items must be a non-empty list")
+            if items is not None:
+                if not isinstance(items, list) or not items:
+                    raise ValueError("items must be a non-empty list")
+            else:
+                detail_urls = self._normalize_detail_urls(payload.get("detail_urls"))
+                url_text = payload.get("url_text")
+                if url_text is not None and not isinstance(url_text, str):
+                    raise ValueError("url_text must be a string")
+
+                extracted_urls = extract_detail_urls_from_text(url_text or "")
+                merged_urls = []
+                seen = set()
+                for detail_url in detail_urls + extracted_urls:
+                    if detail_url in seen:
+                        continue
+                    seen.add(detail_url)
+                    merged_urls.append(detail_url)
+
+                if not merged_urls:
+                    raise ValueError("direct_grab requires non-empty items, detail_urls, or url_text")
+                payload["detail_urls"] = merged_urls
 
         task_id = self.task_store.create_task(task_type, payload)
         self.task_queue.put(task_id)

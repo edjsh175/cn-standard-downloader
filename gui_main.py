@@ -6,11 +6,13 @@ from tkinter import ttk, filedialog, messagebox
 import sys
 import os
 import re
+import tempfile
 import pymysql
 import threading
 from search_module import search_standards_with_output
 from grab_module import BatchCrawler
 from config import DB_CONFIG, load_config, save_config, update_config, get_base_dir
+from utils import extract_detail_urls_from_text, write_excel
 
 # 引入ttkbootstrap实现现代样式
 from ttkbootstrap import Style
@@ -557,10 +559,65 @@ class StandardCrawlerGUI:
             foreground="#E74C3C"
         )
         self.db_status_label.grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
+
+        url_frame = ttk.LabelFrame(self.main_frame, text="URL 批量抓取", padding="10")
+        url_frame.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky=tk.NSEW)
+
+        self.url_placeholder = (
+            "请输入标准详情页 URL，可粘贴多行或带说明文字的整段内容。\n"
+            "支持 gb / hb / db 三类详情页，系统会自动提取有效链接。"
+        )
+        self.url_text = tk.Text(
+            url_frame,
+            height=5,
+            width=80,
+            font=self.font,
+            bg="#FFFFFF",
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground="#DDDDDD",
+            highlightcolor="#2C3E50",
+            highlightthickness=1,
+            wrap=tk.WORD
+        )
+        self.url_text.grid(row=0, column=0, padx=5, pady=5, sticky=tk.NSEW)
+        self.url_text.insert(tk.END, self.url_placeholder)
+        self.url_text.config(fg="#999999")
+        self.url_text.bind("<FocusIn>", self.clear_url_placeholder)
+        self.url_text.bind("<FocusOut>", self.show_url_placeholder)
+
+        url_scrollbar = ttk.Scrollbar(url_frame, orient=tk.VERTICAL, command=self.url_text.yview)
+        url_scrollbar.grid(row=0, column=1, sticky=tk.NS)
+        self.url_text["yscrollcommand"] = url_scrollbar.set
+
+        ttk.Label(
+            url_frame,
+            text="从自由文本中提取 std.samr.gov.cn 详情页 URL，并直接抓取入库。",
+            font=("微软雅黑", 9),
+            foreground="#7F8C8D"
+        ).grid(row=1, column=0, padx=5, pady=2, sticky=tk.W)
+
+        self.url_batch_btn = tk.Button(
+            url_frame,
+            text="URL 批量抓取",
+            command=self.run_url_batch_grab,
+            bg="#FFFFFF",
+            fg="#34495E",
+            font=("微软雅黑", 10),
+            width=18,
+            height=1,
+            bd=2,
+            relief=tk.SOLID,
+            highlightbackground="#4A90E2",
+            cursor="hand2"
+        )
+        self.url_batch_btn.grid(row=2, column=0, padx=5, pady=(8, 2), sticky=tk.W)
+        self.url_batch_btn.bind("<Enter>", self.on_enter)
+        self.url_batch_btn.bind("<Leave>", self.on_leave)
         
         # 3. 功能按钮区域
         button_frame = ttk.Frame(self.main_frame, padding="10")
-        button_frame.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky=tk.NSEW)
+        button_frame.grid(row=3, column=0, columnspan=2, padx=5, pady=5, sticky=tk.NSEW)
         
         # 按钮容器，用于水平居中
         button_container = ttk.Frame(button_frame)
@@ -648,7 +705,7 @@ class StandardCrawlerGUI:
         
         # 4. 日志输出区域
         log_frame = ttk.LabelFrame(self.main_frame, text="运行日志", padding="10")
-        log_frame.grid(row=3, column=0, columnspan=2, padx=5, pady=5, sticky=tk.NSEW)
+        log_frame.grid(row=4, column=0, columnspan=2, padx=5, pady=5, sticky=tk.NSEW)
         
         # 日志框顶部
         log_top_frame = ttk.Frame(log_frame)
@@ -702,9 +759,11 @@ class StandardCrawlerGUI:
         # 配置网格权重
         self.main_frame.columnconfigure(0, weight=1)
         self.main_frame.columnconfigure(1, weight=1)
-        self.main_frame.rowconfigure(3, weight=1)
+        self.main_frame.rowconfigure(4, weight=1)
         keyword_frame.columnconfigure(0, weight=1)
         db_frame.columnconfigure(1, weight=1)
+        url_frame.columnconfigure(0, weight=1)
+        url_frame.rowconfigure(0, weight=1)
         button_frame.columnconfigure(0, weight=1)
         button_frame.columnconfigure(1, weight=1)
         log_frame.columnconfigure(0, weight=1)
@@ -1075,6 +1134,32 @@ class StandardCrawlerGUI:
             return False
         return limit
 
+    def clear_url_placeholder(self, event):
+        content = self.url_text.get(1.0, tk.END).strip()
+        if content == self.url_placeholder:
+            self.url_text.delete(1.0, tk.END)
+            self.url_text.config(fg="#34495E")
+
+    def show_url_placeholder(self, event):
+        content = self.url_text.get(1.0, tk.END).strip()
+        if not content:
+            self.url_text.insert(tk.END, self.url_placeholder)
+            self.url_text.config(fg="#999999")
+
+    def get_direct_detail_urls(self):
+        content = self.url_text.get(1.0, tk.END).strip()
+        if content == self.url_placeholder:
+            content = ""
+        if not content:
+            messagebox.showwarning("输入错误", "请输入详情页 URL 或包含 URL 的文本")
+            return None
+
+        detail_urls = extract_detail_urls_from_text(content)
+        if not detail_urls:
+            messagebox.showwarning("输入错误", "未识别到有效的标准详情页 URL")
+            return None
+        return detail_urls
+
     def get_table_name(self):
         table_name = self.table_combobox.get().strip()
         if not table_name:
@@ -1087,6 +1172,19 @@ class StandardCrawlerGUI:
         task_thread.daemon = False
         self.current_threads.append(task_thread)
         task_thread.start()
+
+    @staticmethod
+    def _build_direct_url_items(detail_urls):
+        return [
+            {
+                "detail_url": detail_url,
+                "code": "",
+                "name": "",
+                "keyword": "direct_url",
+                "status": "现行",
+            }
+            for detail_url in detail_urls
+        ]
 
     def _format_search_summary_message(self, search_result):
         keywords = search_result.get("keywords") or []
@@ -1308,6 +1406,86 @@ class StandardCrawlerGUI:
             generate_failed_output=True,
             failed_keywords=failed_keywords,
         )
+
+    def _run_crawler_with_items(self, table_name, items, failed_keywords=None):
+        temp_dir = os.path.join(get_base_dir(), ".tmp", "gui_direct_url")
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_file = None
+        temp_handle = None
+        try:
+            temp_handle = tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=".xlsx",
+                prefix="direct_url_",
+                dir=temp_dir,
+            )
+            temp_file = temp_handle.name
+            temp_handle.close()
+            write_excel(items, temp_file)
+            return self._run_crawler_with_table(
+                table_name=table_name,
+                excel_file=temp_file,
+                failed_keywords=failed_keywords,
+            )
+        finally:
+            if temp_handle and not temp_handle.closed:
+                temp_handle.close()
+            if temp_file and os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except OSError:
+                    pass
+
+    def run_url_batch_grab(self):
+        detail_urls = self.get_direct_detail_urls()
+        if not detail_urls:
+            return
+
+        table_name = self.get_table_name()
+        if not table_name:
+            return
+
+        confirm_message = (
+            f"识别到 {len(detail_urls)} 个有效详情页 URL。\n\n"
+            f"首个链接：{detail_urls[0]}\n\n"
+            "是否继续抓取并入库？"
+        )
+        if not messagebox.askyesno("确认 URL 批量抓取", confirm_message):
+            return
+
+        original_text = self.url_batch_btn.cget("text")
+        self.url_batch_btn.config(text="处理中...", state=tk.DISABLED)
+        items = self._build_direct_url_items(detail_urls)
+        self._start_task_thread(
+            self._execute_url_batch_grab,
+            table_name,
+            items,
+            original_text,
+        )
+
+    def _execute_url_batch_grab(self, table_name, items, original_text):
+        try:
+            print("=" * 80)
+            print("开始 URL 批量抓取模式")
+            print(f"识别到 {len(items)} 个有效详情页 URL")
+            print("=" * 80)
+            crawl_result = self._run_crawler_with_items(
+                table_name=table_name,
+                items=items,
+                failed_keywords=["direct_url"],
+            )
+            result_message = self._format_crawl_summary_message(crawl_result)
+            self.root.after(
+                0,
+                lambda: self._show_info_with_toast("URL 批量抓取完成", result_message, "执行完成"),
+            )
+        except Exception as exc:
+            error_msg = f"执行过程中出错：{exc}"
+            print(f"错误：{error_msg}")
+            self.root.after(0, lambda: self._show_error_with_toast("执行错误", error_msg))
+        finally:
+            self.current_crawler = None
+            self.root.after(0, lambda: self.url_batch_btn.config(text=original_text, state=tk.NORMAL))
 
     def _execute_only_grab(self, table_name, file_path, original_text):
         try:

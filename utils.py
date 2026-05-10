@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import pandas as pd
 from selenium import webdriver
@@ -13,6 +14,18 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
 import config
+
+
+_SUPPORTED_DETAIL_PATHS = {
+    "/gb/search/gbDetailed": "GB",
+    "/hb/search/stdHBDetailed": "HB",
+    "/db/search/stdDBDetailed": "DB",
+}
+
+_DETAIL_URL_EXTRACT_PATTERN = re.compile(
+    r"https?://std\.samr\.gov\.cn/(?:gb/search/gbDetailed|hb/search/stdHBDetailed|db/search/stdDBDetailed)\?id=[^\s<>'\"，。；、]+",
+    re.IGNORECASE,
+)
 
 
 def _parse_version_tuple(version):
@@ -250,9 +263,12 @@ def write_excel(data, file_path):
 
 
 def clean_text(text):
-    if not text:
+    if text is None or pd.isna(text):
         return ""
-    return re.sub(r"\s+", " ", text).strip()
+    normalized = str(text)
+    if not normalized.strip():
+        return ""
+    return re.sub(r"\s+", " ", normalized).strip()
 
 
 def build_detail_url(tid, pid):
@@ -268,6 +284,65 @@ def build_detail_url(tid, pid):
 def ensure_dir(directory):
     if not os.path.exists(directory):
         os.makedirs(directory, exist_ok=True)
+
+
+def normalize_detail_url(detail_url):
+    raw_value = str(detail_url or "").strip()
+    if not raw_value:
+        return None
+
+    cleaned = raw_value.strip(" \t\r\n\"'<>[](){}.,，。；;、")
+    parsed = urlparse(cleaned)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return None
+    if parsed.netloc.lower() != "std.samr.gov.cn":
+        return None
+
+    canonical_path = next(
+        (path for path in _SUPPORTED_DETAIL_PATHS if parsed.path.lower() == path.lower()),
+        None,
+    )
+    if canonical_path is None:
+        return None
+
+    query = parse_qs(parsed.query)
+    standard_id = str((query.get("id") or [""])[0]).strip()
+    if not standard_id:
+        return None
+
+    return urlunparse(
+        (
+            "https",
+            "std.samr.gov.cn",
+            canonical_path,
+            "",
+            urlencode({"id": standard_id}),
+            "",
+        )
+    )
+
+
+def extract_detail_urls_from_text(text):
+    candidates = _DETAIL_URL_EXTRACT_PATTERN.findall(str(text or ""))
+    normalized = []
+    seen = set()
+    for candidate in candidates:
+        canonical = normalize_detail_url(candidate)
+        if not canonical or canonical in seen:
+            continue
+        seen.add(canonical)
+        normalized.append(canonical)
+    return normalized
+
+
+def infer_standard_type(detail_url=None, code=None):
+    canonical_url = normalize_detail_url(detail_url)
+    if canonical_url:
+        parsed = urlparse(canonical_url)
+        mapped_prefix = _SUPPORTED_DETAIL_PATHS.get(parsed.path)
+        if mapped_prefix:
+            return get_standard_type(mapped_prefix)
+    return get_standard_type(code)
 
 
 def get_standard_type(code):

@@ -30,7 +30,14 @@ from config import (
     TEMP_DIR,
     XPATHS_MAPPING,
 )
-from utils import ensure_dir, get_standard_type, init_driver, init_logger, read_excel
+from utils import (
+    clean_text,
+    ensure_dir,
+    infer_standard_type,
+    init_driver,
+    init_logger,
+    read_excel,
+)
 
 
 class Chaojiying_Client:
@@ -62,6 +69,10 @@ class Chaojiying_Client:
 
 
 class BatchCrawler:
+    STANDARD_CODE_PATTERN = re.compile(
+        r"\b(?:[A-Z]{2,3})(?:/[A-Z])?(?:\s*[A-Z])?\s*\d[\dA-Z.\-\/ ]{1,40}\d\b"
+    )
+
     def __init__(self, log_file=None, cancel_checker=None):
         self.logger = init_logger(log_file or "s2_all_standard_db_adapt.log")
         self.cancel_checker = cancel_checker
@@ -212,6 +223,90 @@ class BatchCrawler:
     def _record_download_summary(self, detail_url, summary):
         if detail_url:
             self.download_summaries[detail_url] = dict(summary)
+
+    def _first_non_empty_text(self, xpath_candidates):
+        for xpath in xpath_candidates:
+            try:
+                elements = self.driver.find_elements(By.XPATH, xpath)
+            except Exception:
+                continue
+            for element in elements:
+                text = clean_text(element.text)
+                if text:
+                    return text
+        return ""
+
+    def _normalize_standard_code(self, value):
+        code = clean_text(value).upper()
+        code = re.sub(r"\s+", " ", code)
+        code = re.sub(r"\s*([\-－])\s*", r"\1", code)
+        return code.strip()
+
+    def _extract_identity_from_text(self, text):
+        cleaned = clean_text(text)
+        if not cleaned:
+            return "", ""
+
+        match = self.STANDARD_CODE_PATTERN.search(cleaned)
+        if not match:
+            return "", ""
+
+        code = self._normalize_standard_code(match.group(0))
+        name = cleaned[match.end():].strip(" :-：|_/")
+        return code, clean_text(name)
+
+    def _extract_standard_identity(self, code, name):
+        resolved_code = clean_text(code)
+        resolved_name = clean_text(name)
+
+        if not resolved_code:
+            code_text = self._first_non_empty_text(
+                [
+                    '//dt[contains(text(), "标准号")]/following-sibling::dd[1]',
+                    '//dt[contains(text(), "标准编号")]/following-sibling::dd[1]',
+                    '//dt[contains(text(), "标准代号")]/following-sibling::dd[1]',
+                ]
+            )
+            if code_text:
+                extracted_code, extracted_name = self._extract_identity_from_text(code_text)
+                resolved_code = extracted_code or self._normalize_standard_code(code_text)
+                if not resolved_name and extracted_name:
+                    resolved_name = extracted_name
+
+        if not resolved_name:
+            resolved_name = self._first_non_empty_text(
+                [
+                    '//dt[contains(text(), "标准名称")]/following-sibling::dd[1]',
+                    '//dt[contains(text(), "中文标准名称")]/following-sibling::dd[1]',
+                    "//h1",
+                    "//h2",
+                ]
+            )
+
+        combined_candidates = [
+            resolved_name,
+            self._first_non_empty_text(["//h1", "//h2"]),
+            clean_text(getattr(self.driver, "title", "")),
+        ]
+        try:
+            body_text = clean_text(self.driver.find_element(By.TAG_NAME, "body").text)
+            combined_candidates.append(body_text[:500])
+        except Exception:
+            pass
+
+        for candidate in combined_candidates:
+            extracted_code, extracted_name = self._extract_identity_from_text(candidate)
+            if not resolved_code and extracted_code:
+                resolved_code = extracted_code
+            if not resolved_name and extracted_name:
+                resolved_name = extracted_name
+            if resolved_code and resolved_name:
+                break
+
+        if resolved_code and resolved_name.startswith(resolved_code):
+            resolved_name = clean_text(resolved_name[len(resolved_code):].strip(" :-：|_/"))
+
+        return clean_text(resolved_code), clean_text(resolved_name)
 
     def _build_run_summary(self, total_items, failed_output_file=None):
         unique_failures = {item["detail_url"]: item for item in self.failed_items if item.get("detail_url")}
@@ -738,7 +833,7 @@ class BatchCrawler:
             summary["debug_files"].append(
                 self._save_request_summary([interstitial_candidate])
             )
-            dst_pdf = self.get_pdf_save_path(row, row.get("code"), row.get("name"))
+            dst_pdf = self.get_pdf_save_path(meta, meta.get("code"), meta.get("name"))
             referer = row.get("detail_url") or self._safe_current_url("")
             return self._download_via_session(interstitial_candidate, dst_pdf, referer, summary)
 
@@ -789,7 +884,7 @@ class BatchCrawler:
         if candidates:
             summary["debug_files"].append(self._save_request_summary(candidates))
 
-        dst_pdf = self.get_pdf_save_path(row, row.get("code"), row.get("name"))
+        dst_pdf = self.get_pdf_save_path(meta, meta.get("code"), meta.get("name"))
 
         if candidates:
             summary["download_url_resolved"] = True
@@ -812,20 +907,22 @@ class BatchCrawler:
         code = row.get("code")
         name = row.get("name")
         detail_url = row.get("detail_url")
-        keyword = row.get("keyword")
-        self.current_code = code
+        self.current_code = clean_text(code) or clean_text(detail_url) or "task"
 
-        if not code or not name or not detail_url:
-            self._add_failed_item(row, "page parse failed: code/name/detail_url missing")
+        if not detail_url:
+            self._add_failed_item(row, "page parse failed: detail_url missing")
             return
 
-        standard_type = get_standard_type(code)
+        standard_type = infer_standard_type(detail_url=detail_url, code=code)
         current_xpaths = XPATHS_MAPPING[standard_type]
         meta = row.copy()
+        meta["code"] = clean_text(code)
+        meta["name"] = clean_text(name)
         meta["status"] = "现行"
         meta["type"] = standard_type
         meta["ps"] = "metadata extracted"
         final_pdf = ""
+        should_save = False
         download_summary = self._new_download_summary(row, standard_type)
 
         try:
@@ -855,6 +952,19 @@ class BatchCrawler:
             except TimeoutException:
                 self.logger.warning("detail metadata wait timed out, continuing")
 
+            resolved_code, resolved_name = self._extract_standard_identity(code, name)
+            meta["code"] = resolved_code
+            meta["name"] = resolved_name or resolved_code
+            self.current_code = resolved_code or self.current_code
+            download_summary["code"] = resolved_code
+
+            if not resolved_code:
+                meta["ps"] = "metadata extraction failed: standard code missing"
+                self._add_failed_item(meta, meta["ps"])
+                return
+
+            should_save = True
+
             fast_meta = self.quick_extract_meta(
                 {
                     "release_date": current_xpaths["release_date"],
@@ -880,32 +990,32 @@ class BatchCrawler:
             meta["replace_standard"] = fast_meta["replace_info"]
             meta["reference_standard"] = fast_meta["reference"]
 
-            if not self._prepare_preview_window(standard_type, current_xpaths, main_handle, meta, row, download_summary):
+            if not self._prepare_preview_window(standard_type, current_xpaths, main_handle, meta, meta, download_summary):
                 meta["download_summary"] = download_summary
                 self._record_download_summary(detail_url, download_summary)
-                self.save_db(meta, final_pdf)
                 return
 
-            final_pdf = self._perform_captcha_and_download(row, meta, standard_type, current_xpaths, download_summary) or ""
+            final_pdf = self._perform_captcha_and_download(meta, meta, standard_type, current_xpaths, download_summary) or ""
             meta["ps"] = "download succeeded" if final_pdf else meta["ps"]
             download_summary["pdf_saved"] = bool(final_pdf)
 
         except TimeoutException as exc:
             meta["ps"] = f"element timeout: {str(exc)[:120]}"
             download_summary["error_stage"] = "timeout"
-            self._add_failed_item(row, meta["ps"])
+            self._add_failed_item(meta, meta["ps"])
         except Exception as exc:
             meta["ps"] = f"process failed: {str(exc)[:160]}"
             if not download_summary.get("error_stage"):
                 download_summary["error_stage"] = "process"
-            self._add_failed_item(row, meta["ps"])
+            self._add_failed_item(meta, meta["ps"])
             self.logger.error(meta["ps"], exc_info=True)
         finally:
             download_summary["debug_files"] = [path for path in download_summary["debug_files"] if path]
             meta["download_summary"] = download_summary
             self._record_download_summary(detail_url, download_summary)
             self.safe_close_window(main_handle)
-            self.save_db(meta, final_pdf)
+            if should_save and meta.get("code"):
+                self.save_db(meta, final_pdf)
 
     def run(self, excel_file=None, generate_failed_output=False, failed_keywords=None):
         total_items = 0
@@ -918,7 +1028,7 @@ class BatchCrawler:
                 self.logger.error("task excel is empty")
                 return self._build_run_summary(total_items=0)
 
-            required_columns = ["code", "name", "detail_url", "keyword"]
+            required_columns = ["detail_url"]
             missing_columns = [column for column in required_columns if column not in df.columns]
             if missing_columns:
                 raise ValueError(f"excel missing required columns: {missing_columns}")

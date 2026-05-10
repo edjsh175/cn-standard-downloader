@@ -5,7 +5,7 @@ from typing import Any
 import config
 from grab_module import BatchCrawler
 from search_module import search_standards_with_output
-from utils import ensure_dir, write_excel
+from utils import ensure_dir, normalize_detail_url, write_excel
 
 
 @contextmanager
@@ -41,19 +41,34 @@ class PipelineRunner:
     def _normalize_direct_items(self, items: list[dict[str, Any]]):
         normalized = []
         for index, item in enumerate(items, 1):
-            detail_url = str(item.get("detail_url", "")).strip()
+            detail_url = normalize_detail_url(item.get("detail_url"))
             code = str(item.get("code", "")).strip()
             name = str(item.get("name", "")).strip()
-            if not detail_url or not code or not name:
-                raise ValueError(
-                    f"direct_grab item #{index} must include detail_url, code, and name"
-                )
+            if not detail_url:
+                raise ValueError(f"direct_grab item #{index} must include a valid detail_url")
             normalized.append(
                 {
                     "detail_url": detail_url,
                     "code": code,
                     "name": name,
                     "keyword": str(item.get("keyword", "direct")).strip() or "direct",
+                    "status": "现行",
+                }
+            )
+        return normalized
+
+    def _build_direct_url_items(self, detail_urls: list[str]):
+        normalized = []
+        for index, raw_url in enumerate(detail_urls, 1):
+            detail_url = normalize_detail_url(raw_url)
+            if not detail_url:
+                raise ValueError(f"direct_grab detail_urls item #{index} is not a supported detail url")
+            normalized.append(
+                {
+                    "detail_url": detail_url,
+                    "code": "",
+                    "name": "",
+                    "keyword": "direct_url",
                     "status": "现行",
                 }
             )
@@ -198,7 +213,10 @@ class PipelineRunner:
             )
             items = search_result["records"]
         elif task_type == "direct_grab":
-            items = self._normalize_direct_items(payload["items"])
+            if payload.get("items"):
+                items = self._normalize_direct_items(payload["items"])
+            else:
+                items = self._build_direct_url_items(payload.get("detail_urls") or [])
             write_excel(items, search_output)
         else:
             raise ValueError(f"Unsupported task type: {task_type}")
