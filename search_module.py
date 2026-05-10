@@ -49,6 +49,19 @@ def get_total_pages(driver):
     return 1
 
 
+def _build_search_metadata(keywords, per_keyword_limit, records, output_file, raw_count, per_keyword_counts):
+    deduplicated_count = len(records)
+    return {
+        "records": records,
+        "output_file": output_file,
+        "keywords": list(keywords),
+        "per_keyword_limit": per_keyword_limit,
+        "raw_count": raw_count,
+        "deduplicated_count": deduplicated_count,
+        "per_keyword_counts": dict(per_keyword_counts),
+    }
+
+
 class Searcher:
     def __init__(self, log_file=None, cancel_checker=None):
         self.logger = init_logger(log_file)
@@ -78,11 +91,21 @@ class Searcher:
         if self.cancel_checker and self.cancel_checker():
             raise RuntimeError("Task cancelled")
 
-    def run(self, keywords, output_filename=None, return_metadata=False):
+    def run(self, keywords, output_filename=None, return_metadata=False, per_keyword_limit=None):
+        if per_keyword_limit is not None and int(per_keyword_limit) <= 0:
+            raise ValueError("per_keyword_limit must be a positive integer or None")
+
+        resolved_limit = int(per_keyword_limit) if per_keyword_limit is not None else None
         self._ensure_driver_alive()
-        search_keywords = keywords
+        search_keywords = list(keywords)
         self.logger.info(f"Using keywords: {', '.join(search_keywords)}")
+        if resolved_limit is None:
+            self.logger.info("Per-keyword limit: all results")
+        else:
+            self.logger.info(f"Per-keyword limit: {resolved_limit}")
+
         all_data = []
+        per_keyword_counts = {keyword: 0 for keyword in search_keywords}
 
         try:
             self.logger.info("Starting standard search")
@@ -110,6 +133,7 @@ class Searcher:
                     keyword_count = 0
                     skipped_type = 0
                     skipped_status = 0
+                    limit_reached = False
 
                     for page_num in range(1, total_pages + 1):
                         self._check_cancelled()
@@ -160,8 +184,18 @@ class Searcher:
                                         }
                                     )
                                     keyword_count += 1
+                                    per_keyword_counts[keyword] = keyword_count
+                                    if resolved_limit is not None and keyword_count >= resolved_limit:
+                                        limit_reached = True
+                                        self.logger.info(
+                                            f"  Reached per-keyword limit for {keyword}: {resolved_limit}"
+                                        )
+                                        break
                             except Exception:
                                 continue
+
+                        if limit_reached:
+                            break
 
                         if page_num % 10 == 0:
                             self.logger.info(f"  Progress: {page_num}/{total_pages} pages")
@@ -184,7 +218,14 @@ class Searcher:
         if not all_data:
             self.logger.warning("No search results found")
             if return_metadata:
-                return {"records": [], "output_file": None}
+                return _build_search_metadata(
+                    keywords=search_keywords,
+                    per_keyword_limit=resolved_limit,
+                    records=[],
+                    output_file=None,
+                    raw_count=0,
+                    per_keyword_counts=per_keyword_counts,
+                )
             return []
 
         import pandas as pd
@@ -195,8 +236,8 @@ class Searcher:
         final_count = len(df)
         df = df.sort_values(by=["keyword", "code"])
 
-        keywords_str = "_".join(keywords)
-        resolved_output_filename = output_filename or f"待抓取清单_全标准_{keywords_str}.xlsx"
+        keywords_str = "_".join(search_keywords)
+        resolved_output_filename = output_filename or f"待抓取标准清单_全标准_{keywords_str}.xlsx"
 
         counter = 1
         while os.path.exists(resolved_output_filename):
@@ -204,45 +245,55 @@ class Searcher:
                 base, ext = os.path.splitext(output_filename)
                 resolved_output_filename = f"{base}_{counter}{ext}"
             else:
-                resolved_output_filename = f"待抓取清单_全标准_{keywords_str}_{counter}.xlsx"
+                resolved_output_filename = f"待抓取标准清单_全标准_{keywords_str}_{counter}.xlsx"
             counter += 1
 
-        write_excel(df.to_dict("records"), resolved_output_filename)
+        records = df.to_dict("records")
+        write_excel(records, resolved_output_filename)
 
-        keyword_stats = df["keyword"].value_counts()
         self.logger.info("=" * 60)
         self.logger.info("Task list generated")
         self.logger.info(f"Raw hits: {initial_count}")
         self.logger.info(f"Deduplicated hits: {final_count}")
         self.logger.info(f"Output file: {os.path.abspath(resolved_output_filename)}")
-        for keyword, count in keyword_stats.items():
+        for keyword, count in per_keyword_counts.items():
             self.logger.info(f"  {keyword}: {count}")
 
-        records = df.to_dict("records")
         if return_metadata:
-            return {
-                "records": records,
-                "output_file": os.path.abspath(resolved_output_filename),
-            }
+            return _build_search_metadata(
+                keywords=search_keywords,
+                per_keyword_limit=resolved_limit,
+                records=records,
+                output_file=os.path.abspath(resolved_output_filename),
+                raw_count=initial_count,
+                per_keyword_counts=per_keyword_counts,
+            )
         return records
 
 
-def search_standards(keywords=None):
+def search_standards(keywords=None, per_keyword_limit=None):
     if keywords is None:
         search_keywords = get_keywords_from_input()
         searcher = Searcher()
-        return searcher.run(search_keywords)
+        return searcher.run(search_keywords, per_keyword_limit=per_keyword_limit)
 
     searcher = Searcher()
-    return searcher.run(keywords)
+    return searcher.run(keywords, per_keyword_limit=per_keyword_limit)
 
 
-def search_standards_with_output(keywords, output_filename=None, log_file=None, cancel_checker=None):
+def search_standards_with_output(
+    keywords,
+    output_filename=None,
+    log_file=None,
+    cancel_checker=None,
+    per_keyword_limit=None,
+):
     searcher = Searcher(log_file=log_file, cancel_checker=cancel_checker)
     return searcher.run(
         keywords,
         output_filename=output_filename,
         return_metadata=True,
+        per_keyword_limit=per_keyword_limit,
     )
 
 

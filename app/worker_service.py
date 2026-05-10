@@ -17,6 +17,24 @@ class TaskWorkerService:
         self.pipeline = PipelineRunner(self.task_store)
         self.task_queue = queue.Queue()
 
+    @staticmethod
+    def _normalize_per_keyword_limit(value):
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        if isinstance(value, bool):
+            raise ValueError("per_keyword_limit must be a positive integer")
+
+        try:
+            normalized = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("per_keyword_limit must be a positive integer") from None
+
+        if normalized <= 0:
+            raise ValueError("per_keyword_limit must be a positive integer")
+        return normalized
+
     def submit_task(self, payload: dict):
         task_type = payload.get("task_type")
         if task_type not in {"keyword_search", "direct_grab"}:
@@ -30,6 +48,7 @@ class TaskWorkerService:
             if not isinstance(keywords, list) or not [kw for kw in keywords if str(kw).strip()]:
                 raise ValueError("keywords must be a non-empty list")
             payload["keywords"] = [str(keyword).strip() for keyword in keywords if str(keyword).strip()]
+            payload["per_keyword_limit"] = self._normalize_per_keyword_limit(payload.get("per_keyword_limit"))
 
         if task_type == "direct_grab":
             items = payload.get("items")

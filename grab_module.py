@@ -213,6 +213,27 @@ class BatchCrawler:
         if detail_url:
             self.download_summaries[detail_url] = dict(summary)
 
+    def _build_run_summary(self, total_items, failed_output_file=None):
+        unique_failures = {item["detail_url"]: item for item in self.failed_items if item.get("detail_url")}
+        failed_count = len(unique_failures)
+        succeeded_count = max(int(total_items) - failed_count, 0)
+        tracked_downloads = list(self.download_summaries.values())
+        resolved_failed_output = os.path.abspath(failed_output_file) if failed_output_file else None
+        return {
+            "total": int(total_items),
+            "succeeded": succeeded_count,
+            "failed": failed_count,
+            "failed_output_file": resolved_failed_output,
+            "download_summary": {
+                "total_items": int(total_items),
+                "tracked_items": len(tracked_downloads),
+                "direct_download_used": sum(1 for item in tracked_downloads if item.get("direct_download_used")),
+                "download_url_resolved": sum(1 for item in tracked_downloads if item.get("download_url_resolved")),
+                "session_extracted": sum(1 for item in tracked_downloads if item.get("session_extracted")),
+                "pdf_saved": sum(1 for item in tracked_downloads if item.get("pdf_saved")),
+            },
+        }
+
     def quick_extract_meta(self, xpaths):
         results = {}
         for key, xpath in xpaths.items():
@@ -886,20 +907,23 @@ class BatchCrawler:
             self.safe_close_window(main_handle)
             self.save_db(meta, final_pdf)
 
-    def run(self, excel_file=None):
+    def run(self, excel_file=None, generate_failed_output=False, failed_keywords=None):
+        total_items = 0
+        failed_output_file = None
         try:
             self._ensure_driver_alive()
             file_path = excel_file or INPUT_FILE
             df = read_excel(file_path)
             if len(df) == 0:
                 self.logger.error("task excel is empty")
-                return
+                return self._build_run_summary(total_items=0)
 
             required_columns = ["code", "name", "detail_url", "keyword"]
             missing_columns = [column for column in required_columns if column not in df.columns]
             if missing_columns:
-                self.logger.error(f"excel missing required columns: {missing_columns}")
-                return
+                raise ValueError(f"excel missing required columns: {missing_columns}")
+
+            total_items = len(df)
 
             for index, (_, row) in enumerate(df.iterrows(), 1):
                 self._check_cancelled()
@@ -907,7 +931,11 @@ class BatchCrawler:
                 time.sleep(2)
                 self.logger.info(f"progress: {index}/{len(df)}")
 
+            if generate_failed_output:
+                failed_output_file = self.generate_failed_excel(keywords=failed_keywords)
+
             self.clear_temp()
+            return self._build_run_summary(total_items=total_items, failed_output_file=failed_output_file)
         finally:
             try:
                 self.driver.quit()

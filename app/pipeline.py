@@ -140,6 +140,25 @@ class PipelineRunner:
         }
 
     @staticmethod
+    def _normalize_search_summary(search_result: dict[str, Any] | None, items: list[dict[str, Any]]):
+        if search_result:
+            return {
+                "keywords": search_result.get("keywords") or [],
+                "per_keyword_limit": search_result.get("per_keyword_limit"),
+                "raw_count": int(search_result.get("raw_count") or 0),
+                "deduplicated_count": int(search_result.get("deduplicated_count") or len(items)),
+                "per_keyword_counts": search_result.get("per_keyword_counts") or {},
+            }
+
+        return {
+            "keywords": [],
+            "per_keyword_limit": None,
+            "raw_count": len(items),
+            "deduplicated_count": len(items),
+            "per_keyword_counts": {},
+        }
+
+    @staticmethod
     def _task_status_from_counts(success_count: int, failure_count: int) -> str:
         if failure_count == 0:
             return "succeeded"
@@ -163,10 +182,10 @@ class PipelineRunner:
 
         task_log = os.path.join(artifact_root, "task.log")
         search_output = os.path.join(artifact_root, "search_results.xlsx")
-        failed_output = os.path.join(artifact_root, "failed_items.xlsx")
-
         task_type = task["task_type"]
         keywords = payload.get("keywords") or []
+        per_keyword_limit = payload.get("per_keyword_limit")
+        search_result = None
 
         self._check_cancelled(task_id)
         if task_type == "keyword_search":
@@ -175,6 +194,7 @@ class PipelineRunner:
                 output_filename=search_output,
                 log_file=task_log,
                 cancel_checker=lambda: self.task_store.is_cancel_requested(task_id),
+                per_keyword_limit=per_keyword_limit,
             )
             items = search_result["records"]
         elif task_type == "direct_grab":
@@ -185,11 +205,14 @@ class PipelineRunner:
 
         self.task_store.upsert_task_items(task_id, items, item_status="pending")
 
+        search_summary = self._normalize_search_summary(search_result, items)
+
         if not items:
             return {
                 "task_id": task_id,
                 "status": "succeeded",
                 "summary": {"total": 0, "succeeded": 0, "failed": 0, "skipped": 0},
+                "search_summary": search_summary,
                 "artifacts": {
                     "search_results": search_output if os.path.exists(search_output) else None,
                     "failed_results": None,
@@ -229,10 +252,17 @@ class PipelineRunner:
         crawler.save_db = tracked_save_db
 
         failed_artifact_name = None
+        crawl_result = None
         try:
             with working_directory(artifact_root):
-                crawler.run(search_output)
-                failed_artifact_name = crawler.generate_failed_excel(keywords=keywords or None)
+                crawl_result = crawler.run(
+                    search_output,
+                    generate_failed_output=True,
+                    failed_keywords=keywords or None,
+                )
+                failed_output_path = (crawl_result or {}).get("failed_output_file")
+                if failed_output_path:
+                    failed_artifact_name = os.path.basename(failed_output_path)
         except RuntimeError:
             if crawler.failed_items:
                 with working_directory(artifact_root):
@@ -246,7 +276,10 @@ class PipelineRunner:
             saved_results,
             crawler.failed_items,
         )
-        download_summary = self._summarize_downloads(items, crawler.download_summaries)
+        download_summary = (crawl_result or {}).get("download_summary") or self._summarize_downloads(
+            items,
+            crawler.download_summaries,
+        )
 
         resolved_failed_output = None
         if failed_artifact_name:
@@ -262,6 +295,7 @@ class PipelineRunner:
                 "failed": failure_count,
                 "skipped": 0,
             },
+            "search_summary": search_summary,
             "artifacts": {
                 "search_results": search_output if os.path.exists(search_output) else None,
                 "failed_results": resolved_failed_output if resolved_failed_output and os.path.exists(resolved_failed_output) else None,
