@@ -6,11 +6,13 @@ from tkinter import ttk, filedialog, messagebox
 import sys
 import os
 import re
+import tempfile
 import pymysql
 import threading
-from search_module import search_standards
+from search_module import search_standards_with_output
 from grab_module import BatchCrawler
 from config import DB_CONFIG, load_config, save_config, update_config, get_base_dir
+from utils import extract_detail_urls_from_text, write_excel
 
 # 引入ttkbootstrap实现现代样式
 from ttkbootstrap import Style
@@ -356,6 +358,7 @@ class StandardCrawlerGUI:
         # 初始化变量
         self.table_names = []
         self.selected_table = tk.StringVar()
+        self.duplicate_policy_var = tk.StringVar(value="覆盖更新（默认）")
         self.db_connected = False
         # 跟踪当前运行的线程和crawler实例
         self.current_threads = []
@@ -498,6 +501,33 @@ class StandardCrawlerGUI:
         # 绑定事件
         self.keyword_text.bind("<FocusIn>", self.clear_placeholder)
         self.keyword_text.bind("<FocusOut>", self.show_placeholder)
+
+        self.search_limit_var = tk.StringVar()
+        ttk.Label(
+            keyword_frame,
+            text="每个关键词最多抓取 N 条：",
+            font=self.title_font,
+            style="Title.TLabel"
+        ).grid(row=2, column=0, padx=5, pady=(8, 4), sticky=tk.W)
+
+        limit_entry = ttk.Entry(
+            keyword_frame,
+            textvariable=self.search_limit_var,
+            width=18,
+            font=self.font
+        )
+        limit_entry.grid(row=2, column=0, padx=(175, 5), pady=(8, 4), sticky=tk.W)
+
+        ttk.Label(
+            keyword_frame,
+            text="留空则全部爬取",
+            font=("寰蒋闆呴粦", 9),
+            foreground="#7F8C8D"
+        ).grid(row=2, column=0, padx=(320, 5), pady=(8, 4), sticky=tk.W)
+        self.keyword_placeholder = "请输入搜索关键词（多个用顿号/逗号/空格分隔），示例：人工智能、大数据"
+        self.keyword_text.delete(1.0, tk.END)
+        self.keyword_text.insert(tk.END, self.keyword_placeholder)
+        self.keyword_text.config(fg="#999999")
         
         # 2. 数据库表名选择区域
         db_frame = ttk.LabelFrame(self.main_frame, text="数据库配置", padding="10")
@@ -530,10 +560,90 @@ class StandardCrawlerGUI:
             foreground="#E74C3C"
         )
         self.db_status_label.grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
+
+        ttk.Label(
+            db_frame,
+            text="重复数据处理：",
+            font=self.title_font,
+            style="Title.TLabel"
+        ).grid(row=1, column=0, padx=5, pady=(8, 5), sticky=tk.E)
+
+        self.duplicate_policy_combobox = ttk.Combobox(
+            db_frame,
+            textvariable=self.duplicate_policy_var,
+            width=18,
+            font=self.font,
+            state="readonly",
+            values=["覆盖更新（默认）", "跳过已存在"],
+        )
+        self.duplicate_policy_combobox.grid(row=1, column=1, padx=5, pady=(8, 5), sticky=tk.W)
+        self.duplicate_policy_combobox.set("覆盖更新（默认）")
+
+        ttk.Label(
+            db_frame,
+            text="覆盖更新会写入新值；跳过已存在不会覆盖旧记录",
+            font=("微软雅黑", 9),
+            foreground="#7F8C8D"
+        ).grid(row=1, column=2, padx=5, pady=(8, 5), sticky=tk.W)
+
+        url_frame = ttk.LabelFrame(self.main_frame, text="URL 批量抓取", padding="10")
+        url_frame.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky=tk.NSEW)
+
+        self.url_placeholder = (
+            "请输入标准详情页 URL，可粘贴多行或带说明文字的整段内容。\n"
+            "支持 gb / hb / db 三类详情页，系统会自动提取有效链接。"
+        )
+        self.url_text = tk.Text(
+            url_frame,
+            height=5,
+            width=80,
+            font=self.font,
+            bg="#FFFFFF",
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground="#DDDDDD",
+            highlightcolor="#2C3E50",
+            highlightthickness=1,
+            wrap=tk.WORD
+        )
+        self.url_text.grid(row=0, column=0, padx=5, pady=5, sticky=tk.NSEW)
+        self.url_text.insert(tk.END, self.url_placeholder)
+        self.url_text.config(fg="#999999")
+        self.url_text.bind("<FocusIn>", self.clear_url_placeholder)
+        self.url_text.bind("<FocusOut>", self.show_url_placeholder)
+
+        url_scrollbar = ttk.Scrollbar(url_frame, orient=tk.VERTICAL, command=self.url_text.yview)
+        url_scrollbar.grid(row=0, column=1, sticky=tk.NS)
+        self.url_text["yscrollcommand"] = url_scrollbar.set
+
+        ttk.Label(
+            url_frame,
+            text="从自由文本中提取 std.samr.gov.cn 详情页 URL，并直接抓取入库。",
+            font=("微软雅黑", 9),
+            foreground="#7F8C8D"
+        ).grid(row=1, column=0, padx=5, pady=2, sticky=tk.W)
+
+        self.url_batch_btn = tk.Button(
+            url_frame,
+            text="URL 批量抓取",
+            command=self.run_url_batch_grab,
+            bg="#FFFFFF",
+            fg="#34495E",
+            font=("微软雅黑", 10),
+            width=18,
+            height=1,
+            bd=2,
+            relief=tk.SOLID,
+            highlightbackground="#4A90E2",
+            cursor="hand2"
+        )
+        self.url_batch_btn.grid(row=2, column=0, padx=5, pady=(8, 2), sticky=tk.W)
+        self.url_batch_btn.bind("<Enter>", self.on_enter)
+        self.url_batch_btn.bind("<Leave>", self.on_leave)
         
         # 3. 功能按钮区域
         button_frame = ttk.Frame(self.main_frame, padding="10")
-        button_frame.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky=tk.NSEW)
+        button_frame.grid(row=3, column=0, columnspan=2, padx=5, pady=5, sticky=tk.NSEW)
         
         # 按钮容器，用于水平居中
         button_container = ttk.Frame(button_frame)
@@ -621,7 +731,7 @@ class StandardCrawlerGUI:
         
         # 4. 日志输出区域
         log_frame = ttk.LabelFrame(self.main_frame, text="运行日志", padding="10")
-        log_frame.grid(row=3, column=0, columnspan=2, padx=5, pady=5, sticky=tk.NSEW)
+        log_frame.grid(row=4, column=0, columnspan=2, padx=5, pady=5, sticky=tk.NSEW)
         
         # 日志框顶部
         log_top_frame = ttk.Frame(log_frame)
@@ -675,9 +785,11 @@ class StandardCrawlerGUI:
         # 配置网格权重
         self.main_frame.columnconfigure(0, weight=1)
         self.main_frame.columnconfigure(1, weight=1)
-        self.main_frame.rowconfigure(3, weight=1)
+        self.main_frame.rowconfigure(4, weight=1)
         keyword_frame.columnconfigure(0, weight=1)
         db_frame.columnconfigure(1, weight=1)
+        url_frame.columnconfigure(0, weight=1)
+        url_frame.rowconfigure(0, weight=1)
         button_frame.columnconfigure(0, weight=1)
         button_frame.columnconfigure(1, weight=1)
         log_frame.columnconfigure(0, weight=1)
@@ -1001,6 +1113,486 @@ class StandardCrawlerGUI:
             # 在主线程中恢复按钮状态
             self.root.after(0, lambda: self.only_grab_btn.config(text=original_text, state=tk.NORMAL))
     
+    def clear_placeholder(self, event):
+        content = self.keyword_text.get(1.0, tk.END).strip()
+        if content == self.keyword_placeholder:
+            self.keyword_text.delete(1.0, tk.END)
+            self.keyword_text.config(fg="#34495E")
+
+    def show_placeholder(self, event):
+        content = self.keyword_text.get(1.0, tk.END).strip()
+        if not content:
+            self.keyword_text.insert(tk.END, self.keyword_placeholder)
+            self.keyword_text.config(fg="#999999")
+
+    def get_keywords(self):
+        content = self.keyword_text.get(1.0, tk.END).strip()
+        if content == self.keyword_placeholder:
+            content = ""
+
+        if not content:
+            messagebox.showwarning("输入错误", "请输入关键词")
+            return None
+
+        separators = r"[、，,\s;]+"
+        keywords = re.split(separators, content)
+        keywords = [kw.strip() for kw in keywords if kw.strip()]
+
+        unique_keywords = []
+        for kw in keywords:
+            if kw not in unique_keywords:
+                unique_keywords.append(kw)
+
+        print(f"提取到 {len(unique_keywords)} 个关键词: {', '.join(unique_keywords)}")
+        return unique_keywords
+
+    def get_per_keyword_limit(self):
+        raw_value = self.search_limit_var.get().strip()
+        if not raw_value:
+            return None
+        if not raw_value.isdigit():
+            messagebox.showwarning("输入错误", "数量控制必须是正整数，留空表示全部爬取")
+            return False
+
+        limit = int(raw_value)
+        if limit <= 0:
+            messagebox.showwarning("输入错误", "数量控制必须大于 0")
+            return False
+        return limit
+
+    def clear_url_placeholder(self, event):
+        content = self.url_text.get(1.0, tk.END).strip()
+        if content == self.url_placeholder:
+            self.url_text.delete(1.0, tk.END)
+            self.url_text.config(fg="#34495E")
+
+    def show_url_placeholder(self, event):
+        content = self.url_text.get(1.0, tk.END).strip()
+        if not content:
+            self.url_text.insert(tk.END, self.url_placeholder)
+            self.url_text.config(fg="#999999")
+
+    def get_direct_detail_urls(self):
+        content = self.url_text.get(1.0, tk.END).strip()
+        if content == self.url_placeholder:
+            content = ""
+        if not content:
+            messagebox.showwarning("输入错误", "请输入详情页 URL 或包含 URL 的文本")
+            return None
+
+        detail_urls = extract_detail_urls_from_text(content)
+        if not detail_urls:
+            messagebox.showwarning("输入错误", "未识别到有效的标准详情页 URL")
+            return None
+        return detail_urls
+
+    def get_table_name(self):
+        table_name = self.table_combobox.get().strip()
+        if not table_name:
+            messagebox.showwarning("输入错误", "请选择或输入表名")
+            return None
+        return table_name
+
+    def get_duplicate_policy(self):
+        raw_value = self.duplicate_policy_var.get().strip()
+        policy_mapping = {
+            "覆盖更新（默认）": "overwrite",
+            "跳过已存在": "skip",
+            "overwrite": "overwrite",
+            "skip": "skip",
+        }
+        policy = policy_mapping.get(raw_value)
+        if not policy:
+            messagebox.showwarning("输入错误", "重复数据处理必须是 overwrite 或 skip")
+            return None
+        return policy
+
+    @staticmethod
+    def format_duplicate_policy_label(policy):
+        return "覆盖更新" if policy == "overwrite" else "跳过已存在"
+
+    def _start_task_thread(self, target, *args):
+        task_thread = threading.Thread(target=target, args=args)
+        task_thread.daemon = False
+        self.current_threads.append(task_thread)
+        task_thread.start()
+
+    @staticmethod
+    def _build_direct_url_items(detail_urls):
+        return [
+            {
+                "detail_url": detail_url,
+                "code": "",
+                "name": "",
+                "keyword": "direct_url",
+                "status": "现行",
+            }
+            for detail_url in detail_urls
+        ]
+
+    def _format_search_summary_message(self, search_result):
+        keywords = search_result.get("keywords") or []
+        per_keyword_limit = search_result.get("per_keyword_limit")
+        per_keyword_counts = search_result.get("per_keyword_counts") or {}
+        lines = [
+            f"关键词：{', '.join(keywords) if keywords else '无'}",
+            f"每关键词数量限制：{per_keyword_limit if per_keyword_limit else '全部'}",
+            f"原始命中数：{search_result.get('raw_count', 0)}",
+            f"去重后待抓取数：{search_result.get('deduplicated_count', 0)}",
+            f"结果文件：{search_result.get('output_file') or '未生成'}",
+        ]
+        if per_keyword_counts:
+            lines.append("")
+            lines.append("各关键词命中数：")
+            for keyword, count in per_keyword_counts.items():
+                lines.append(f"- {keyword}: {count}")
+        return "\n".join(lines)
+
+    def _format_crawl_summary_message(self, crawl_result):
+        lines = [
+            f"总数：{crawl_result.get('total', 0)}",
+            f"成功：{crawl_result.get('succeeded', 0)}",
+            f"失败：{crawl_result.get('failed', 0)}",
+        ]
+        write_summary = crawl_result.get("write_summary") or crawl_result.get("db_write_summary") or {}
+        if write_summary:
+            lines.extend(
+                [
+                    f"新增：{write_summary.get('inserted', crawl_result.get('inserted', 0))}",
+                    f"更新：{write_summary.get('updated', crawl_result.get('updated', 0))}",
+                    f"跳过：{write_summary.get('skipped', crawl_result.get('skipped', 0))}",
+                ]
+            )
+            if write_summary.get("duplicate_policy") == "skip":
+                lines.append("提示：已存在数据已跳过，未覆盖旧记录")
+            elif write_summary.get("duplicate_policy") == "overwrite":
+                lines.append("提示：已存在数据按覆盖更新处理")
+        failed_output = crawl_result.get("failed_output_file")
+        if failed_output:
+            lines.append(f"失败清单：{failed_output}")
+
+        download_summary = crawl_result.get("download_summary") or {}
+        if download_summary:
+            lines.append("")
+            lines.append("下载摘要：")
+            lines.append(f"- 已跟踪条目：{download_summary.get('tracked_items', 0)}")
+            lines.append(f"- 已保存 PDF：{download_summary.get('pdf_saved', 0)}")
+            lines.append(f"- 解析到下载链接：{download_summary.get('download_url_resolved', 0)}")
+        return "\n".join(lines)
+
+    def _show_info_with_toast(self, title, message, toast_title=None):
+        messagebox.showinfo(title, message)
+        self.show_toast(toast_title or title, title, "success")
+
+    def _show_error_with_toast(self, title, message):
+        messagebox.showerror(title, message)
+        self.show_toast(title, message, "error")
+
+    def _extract_keywords_from_excel(self, file_path):
+        keywords = []
+        try:
+            import pandas as pd
+
+            df = pd.read_excel(file_path)
+            if "keyword" in df.columns:
+                keywords = list(df["keyword"].unique())
+                keywords = [kw for kw in keywords if pd.notna(kw) and str(kw).strip()]
+        except Exception as exc:
+            print(f"提示：无法从 Excel 中提取关键词: {exc}")
+        return keywords
+
+    def run_full_process(self):
+        keywords = self.get_keywords()
+        if not keywords:
+            return
+
+        per_keyword_limit = self.get_per_keyword_limit()
+        if per_keyword_limit is False:
+            return
+
+        table_name = self.get_table_name()
+        if not table_name:
+            return
+
+        duplicate_policy = self.get_duplicate_policy()
+        if not duplicate_policy:
+            return
+
+        original_text = self.full_process_btn.cget("text")
+        self.full_process_btn.config(text="搜索中...", state=tk.DISABLED)
+        self._start_task_thread(
+            self._execute_full_process_search,
+            keywords,
+            per_keyword_limit,
+            table_name,
+            duplicate_policy,
+            original_text,
+        )
+
+    def _execute_full_process_search(self, keywords, per_keyword_limit, table_name, duplicate_policy, original_text):
+        try:
+            print("=" * 80)
+            print("开始完整流程")
+            print("=" * 80)
+            print("\n步骤1：执行标准搜索")
+            search_result = search_standards_with_output(
+                keywords,
+                per_keyword_limit=per_keyword_limit,
+            )
+            self.root.after(
+                0,
+                lambda: self._handle_full_process_search_result(
+                    keywords,
+                    per_keyword_limit,
+                    table_name,
+                    duplicate_policy,
+                    original_text,
+                    search_result,
+                ),
+            )
+        except Exception as exc:
+            error_msg = f"搜索过程中出错：{exc}"
+            print(f"错误：{error_msg}")
+            self.root.after(
+                0,
+                lambda: (
+                    self.full_process_btn.config(text=original_text, state=tk.NORMAL),
+                    self._show_error_with_toast("执行错误", error_msg),
+                ),
+            )
+
+    def _handle_full_process_search_result(self, keywords, per_keyword_limit, table_name, duplicate_policy, original_text, search_result):
+        if not search_result.get("records"):
+            self.full_process_btn.config(text=original_text, state=tk.NORMAL)
+            self._show_info_with_toast("搜索完成", self._format_search_summary_message(search_result), "无可抓取结果")
+            return
+
+        confirm_message = self._format_search_summary_message(search_result)
+        should_continue = messagebox.askyesno(
+            "确认下载",
+            f"{confirm_message}\n重复策略：{self.format_duplicate_policy_label(duplicate_policy)}\n\n是否继续下载并入库？",
+        )
+        if not should_continue:
+            print("用户取消了后续下载")
+            self.full_process_btn.config(text=original_text, state=tk.NORMAL)
+            return
+
+        print("\n步骤2：执行标准抓取")
+        self.full_process_btn.config(text="抓取中...", state=tk.DISABLED)
+        self._start_task_thread(
+            self._execute_full_process_crawl,
+            keywords,
+            table_name,
+            duplicate_policy,
+            search_result,
+            original_text,
+        )
+
+    def _execute_full_process_crawl(self, keywords, table_name, duplicate_policy, search_result, original_text):
+        try:
+            crawl_result = self._run_crawler_with_table(
+                table_name=table_name,
+                excel_file=search_result["output_file"],
+                failed_keywords=keywords,
+                duplicate_policy=duplicate_policy,
+            )
+            print("\n完整流程执行完成")
+            result_message = self._format_crawl_summary_message(crawl_result)
+            self.root.after(
+                0,
+                lambda: self._show_info_with_toast("完整流程执行完成", result_message, "执行完成"),
+            )
+        except Exception as exc:
+            error_msg = f"执行过程中出错：{exc}"
+            print(f"错误：{error_msg}")
+            self.root.after(0, lambda: self._show_error_with_toast("执行错误", error_msg))
+        finally:
+            self.current_crawler = None
+            self.root.after(0, lambda: self.full_process_btn.config(text=original_text, state=tk.NORMAL))
+
+    def run_only_excel(self):
+        keywords = self.get_keywords()
+        if not keywords:
+            return
+
+        per_keyword_limit = self.get_per_keyword_limit()
+        if per_keyword_limit is False:
+            return
+
+        original_text = self.only_excel_btn.cget("text")
+        self.only_excel_btn.config(text="处理中...", state=tk.DISABLED)
+        self._start_task_thread(self._execute_only_excel, keywords, per_keyword_limit, original_text)
+
+    def _execute_only_excel(self, keywords, per_keyword_limit, original_text):
+        try:
+            print("=" * 80)
+            print("开始仅生成待抓取 Excel")
+            print("=" * 80)
+            search_result = search_standards_with_output(
+                keywords,
+                per_keyword_limit=per_keyword_limit,
+            )
+            message = self._format_search_summary_message(search_result)
+            self.root.after(
+                0,
+                lambda: self._show_info_with_toast("待抓取 Excel 已生成", message, "执行完成"),
+            )
+        except Exception as exc:
+            error_msg = f"执行过程中出错：{exc}"
+            print(f"错误：{error_msg}")
+            self.root.after(0, lambda: self._show_error_with_toast("执行错误", error_msg))
+        finally:
+            self.root.after(0, lambda: self.only_excel_btn.config(text=original_text, state=tk.NORMAL))
+
+    def run_only_grab(self):
+        table_name = self.get_table_name()
+        if not table_name:
+            return
+
+        duplicate_policy = self.get_duplicate_policy()
+        if not duplicate_policy:
+            return
+
+        file_path = filedialog.askopenfilename(
+            title="选择待抓取 Excel 文件",
+            filetypes=[("Excel文件", "*.xlsx"), ("所有文件", "*.*")],
+        )
+        if not file_path:
+            return
+
+        original_text = self.only_grab_btn.cget("text")
+        self.only_grab_btn.config(text="处理中...", state=tk.DISABLED)
+        self._start_task_thread(self._execute_only_grab, table_name, duplicate_policy, file_path, original_text)
+
+    def _run_crawler_with_table(self, table_name, excel_file, failed_keywords=None, duplicate_policy="overwrite"):
+        crawler = BatchCrawler(duplicate_policy=duplicate_policy)
+        self.current_crawler = crawler
+        original_save_db = crawler.save_db
+
+        def custom_save_db(meta, path):
+            return original_save_db(meta, path, table_name)
+
+        crawler.save_db = custom_save_db
+        return crawler.run(
+            excel_file,
+            generate_failed_output=True,
+            failed_keywords=failed_keywords,
+        )
+
+    def _run_crawler_with_items(self, table_name, items, failed_keywords=None, duplicate_policy="overwrite"):
+        temp_dir = os.path.join(get_base_dir(), ".tmp", "gui_direct_url")
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_file = None
+        temp_handle = None
+        try:
+            temp_handle = tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=".xlsx",
+                prefix="direct_url_",
+                dir=temp_dir,
+            )
+            temp_file = temp_handle.name
+            temp_handle.close()
+            write_excel(items, temp_file)
+            return self._run_crawler_with_table(
+                table_name=table_name,
+                excel_file=temp_file,
+                failed_keywords=failed_keywords,
+                duplicate_policy=duplicate_policy,
+            )
+        finally:
+            if temp_handle and not temp_handle.closed:
+                temp_handle.close()
+            if temp_file and os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except OSError:
+                    pass
+
+    def run_url_batch_grab(self):
+        detail_urls = self.get_direct_detail_urls()
+        if not detail_urls:
+            return
+
+        table_name = self.get_table_name()
+        if not table_name:
+            return
+
+        duplicate_policy = self.get_duplicate_policy()
+        if not duplicate_policy:
+            return
+
+        confirm_message = (
+            f"识别到 {len(detail_urls)} 个有效详情页 URL。\n\n"
+            f"首个链接：{detail_urls[0]}\n"
+            f"重复策略：{self.format_duplicate_policy_label(duplicate_policy)}\n\n"
+            "是否继续抓取并入库？"
+        )
+        if not messagebox.askyesno("确认 URL 批量抓取", confirm_message):
+            return
+
+        original_text = self.url_batch_btn.cget("text")
+        self.url_batch_btn.config(text="处理中...", state=tk.DISABLED)
+        items = self._build_direct_url_items(detail_urls)
+        self._start_task_thread(
+            self._execute_url_batch_grab,
+            table_name,
+            duplicate_policy,
+            items,
+            original_text,
+        )
+
+    def _execute_url_batch_grab(self, table_name, duplicate_policy, items, original_text):
+        try:
+            print("=" * 80)
+            print("开始 URL 批量抓取模式")
+            print(f"识别到 {len(items)} 个有效详情页 URL")
+            print("=" * 80)
+            crawl_result = self._run_crawler_with_items(
+                table_name=table_name,
+                items=items,
+                failed_keywords=["direct_url"],
+                duplicate_policy=duplicate_policy,
+            )
+            result_message = self._format_crawl_summary_message(crawl_result)
+            self.root.after(
+                0,
+                lambda: self._show_info_with_toast("URL 批量抓取完成", result_message, "执行完成"),
+            )
+        except Exception as exc:
+            error_msg = f"执行过程中出错：{exc}"
+            print(f"错误：{error_msg}")
+            self.root.after(0, lambda: self._show_error_with_toast("执行错误", error_msg))
+        finally:
+            self.current_crawler = None
+            self.root.after(0, lambda: self.url_batch_btn.config(text=original_text, state=tk.NORMAL))
+
+    def _execute_only_grab(self, table_name, duplicate_policy, file_path, original_text):
+        try:
+            print("=" * 80)
+            print("开始仅抓取模式")
+            print(f"指定 Excel 文件：{file_path}")
+            print("=" * 80)
+            keywords = self._extract_keywords_from_excel(file_path)
+            crawl_result = self._run_crawler_with_table(
+                table_name=table_name,
+                excel_file=file_path,
+                failed_keywords=keywords,
+                duplicate_policy=duplicate_policy,
+            )
+            result_message = self._format_crawl_summary_message(crawl_result)
+            self.root.after(
+                0,
+                lambda: self._show_info_with_toast("仅抓取模式执行完成", result_message, "执行完成"),
+            )
+        except Exception as exc:
+            error_msg = f"执行过程中出错：{exc}"
+            print(f"错误：{error_msg}")
+            self.root.after(0, lambda: self._show_error_with_toast("执行错误", error_msg))
+        finally:
+            self.current_crawler = None
+            self.root.after(0, lambda: self.only_grab_btn.config(text=original_text, state=tk.NORMAL))
+
     def exit_app(self):
         """退出应用"""
         if messagebox.askokcancel("退出", "确定要退出吗？"):

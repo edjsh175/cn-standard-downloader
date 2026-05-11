@@ -1,176 +1,356 @@
-# utils.py - 通用工具模块
-# 实现项目通用工具函数
-
-import os
-import sys
 import logging
+import os
 import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
 import pandas as pd
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
-from config import DOWNLOAD_PREFS
 
-# ================= 浏览器初始化 =================
+import config
+
+
+_SUPPORTED_DETAIL_PATHS = {
+    "/gb/search/gbDetailed": "GB",
+    "/hb/search/stdHBDetailed": "HB",
+    "/db/search/stdDBDetailed": "DB",
+}
+
+_DETAIL_URL_EXTRACT_PATTERN = re.compile(
+    r"https?://std\.samr\.gov\.cn/(?:gb/search/gbDetailed|hb/search/stdHBDetailed|db/search/stdDBDetailed)\?id=[^\s<>'\"，。；、]+",
+    re.IGNORECASE,
+)
+
+
+def _parse_version_tuple(version):
+    text = str(version or "").strip()
+    match = re.findall(r"\d+", text)
+    return tuple(int(part) for part in match) if match else tuple()
+
+
+def _candidate_driver_paths():
+    candidates = []
+
+    explicit = os.environ.get("STD_CHROMEDRIVER_PATH")
+    if explicit:
+        candidates.append(Path(explicit))
+
+    drivers_root = Path(config.get_base_dir()) / "drivers"
+    candidates.append(drivers_root / "chromedriver.exe")
+    candidates.append(drivers_root / "chromedriver")
+    if drivers_root.exists():
+        candidates.extend(drivers_root.rglob("chromedriver.exe"))
+        candidates.extend(drivers_root.rglob("chromedriver"))
+
+    wdm_root = Path.home() / ".wdm" / "drivers" / "chromedriver" / "win64"
+    if wdm_root.exists():
+        candidates.extend(wdm_root.glob("*/chromedriver-win32/chromedriver.exe"))
+    wdm_linux_root = Path.home() / ".wdm" / "drivers" / "chromedriver" / "linux64"
+    if wdm_linux_root.exists():
+        candidates.extend(wdm_linux_root.glob("*/chromedriver-linux64/chromedriver"))
+
+    candidates.extend(
+        [
+            Path("/usr/bin/chromedriver"),
+            Path("/usr/local/bin/chromedriver"),
+        ]
+    )
+
+    seen = set()
+    unique = []
+    for path in candidates:
+        resolved = str(path)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(path)
+    return unique
+
+
+def _get_chrome_binary_path():
+    explicit = os.environ.get("STD_CHROME_BINARY")
+    candidates = [
+        explicit,
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        shutil.which("google-chrome"),
+        shutil.which("google-chrome-stable"),
+        shutil.which("chromium"),
+        shutil.which("chromium-browser"),
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate)
+        if path.exists():
+            return path
+    return None
+
+
+def _get_chrome_version():
+    chrome_path = _get_chrome_binary_path()
+    if chrome_path is None:
+        return tuple()
+    try:
+        return _get_binary_version(chrome_path)
+    except Exception:
+        return tuple()
+
+
+def _get_binary_version(path: Path):
+    if not path.exists():
+        return tuple()
+
+    try:
+        output = subprocess.check_output(
+            [str(path), "--version"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        parsed = _parse_version_tuple(output)
+        if parsed:
+            return parsed
+    except Exception:
+        pass
+
+    if os.name == "nt":
+        command = [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            f"(Get-Item '{path}').VersionInfo.ProductVersion",
+        ]
+        try:
+            output = subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL).strip()
+            return _parse_version_tuple(output)
+        except Exception:
+            return tuple()
+
+    return tuple()
+
+
+def _get_driver_version(path: Path):
+    parent_hints = [path.parent.name, path.parent.parent.name if path.parent.parent else ""]
+    for hint in parent_hints:
+        parsed = _parse_version_tuple(hint)
+        if parsed:
+            return parsed
+    return _get_binary_version(path)
+
+
+def _pick_cached_driver():
+    existing = [path for path in _candidate_driver_paths() if path.exists()]
+    if not existing:
+        return None
+
+    chrome_version = _get_chrome_version()
+    chrome_major = chrome_version[:1]
+
+    def score(path):
+        version = _get_driver_version(path)
+        version_major = version[:1]
+        is_exact_major = 1 if chrome_major and version_major == chrome_major else 0
+        is_full_match = 1 if chrome_version and version == chrome_version else 0
+        repo_bias = 1 if Path(config.get_base_dir()) / "drivers" in path.parents else 0
+        return (is_exact_major, is_full_match, repo_bias, version)
+
+    return max(existing, key=score)
+
+
+def _build_chrome_service():
+    cached_driver = _pick_cached_driver()
+    if cached_driver is not None:
+        return Service(str(cached_driver))
+    return Service(ChromeDriverManager().install())
+
+
 def init_driver(download_dir=None):
-    """初始化Chrome浏览器实例（含反爬参数）
-    
-    Args:
-        download_dir: 下载目录路径，默认为None
-    
-    Returns:
-        webdriver.Chrome: 配置好的Chrome浏览器实例
-    """
     opts = Options()
-    # 反爬配置
+    opts.page_load_strategy = "eager"
     opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
-    opts.add_experimental_option('useAutomationExtension', False)
-    opts.add_argument('--disable-blink-features=AutomationControlled')
-    opts.add_argument('--start-maximized')
-    opts.add_argument('--no-sandbox')
-    opts.add_argument('--disable-dev-shm-usage')
-    opts.add_argument('--ignore-certificate-errors')
-    opts.add_argument('--allow-running-insecure-content')
-    opts.add_argument('--disable-web-security')
-    
-    # 下载设置
-    prefs = DOWNLOAD_PREFS.copy()
+    opts.add_experimental_option("useAutomationExtension", False)
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--ignore-certificate-errors")
+    opts.add_argument("--allow-running-insecure-content")
+    opts.add_argument("--disable-web-security")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--disable-software-rasterizer")
+    opts.add_argument("--hide-scrollbars")
+    opts.add_argument("--window-size=1920,1080")
+    opts.set_capability("goog:loggingPrefs", {"performance": "ALL", "browser": "ALL"})
+
+    prefs = config.DOWNLOAD_PREFS.copy()
     if download_dir:
         prefs["download.default_directory"] = os.path.abspath(download_dir)
     opts.add_experimental_option("prefs", prefs)
-    
-    # 初始化浏览器
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
-    # 进一步反爬处理
+
+    if config.HEADLESS_BROWSER:
+        opts.add_argument("--headless=new")
+        opts.add_argument("--remote-debugging-port=9222")
+
+    chrome_binary = _get_chrome_binary_path()
+    if chrome_binary is not None:
+        opts.binary_location = str(chrome_binary)
+
+    driver = webdriver.Chrome(service=_build_chrome_service(), options=opts)
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-    
+
+    try:
+        driver.execute_cdp_cmd(
+            "Page.setDownloadBehavior",
+            {
+                "behavior": "allow",
+                "downloadPath": os.path.abspath(download_dir or config.TEMP_DIR),
+            },
+        )
+    except Exception:
+        pass
+
+    try:
+        driver.execute_cdp_cmd("Network.enable", {})
+    except Exception:
+        pass
+
     return driver
 
-# ================= 日志系统初始化 =================
+
 def init_logger(log_file=None):
-    """初始化日志系统
-    
-    Args:
-        log_file: 日志文件路径，默认为None
-    
-    Returns:
-        logging.Logger: 配置好的日志记录器
-    """
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.INFO)
-    
-    # 清空现有处理器
+
     if logger.handlers:
         logger.handlers.clear()
-    
-    # 控制台处理器
+
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
-    
-    # 日志格式
-    formatter = logging.Formatter('%(asctime)s - %(message)s')
+
+    formatter = logging.Formatter("%(asctime)s - %(message)s")
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
-    
-    # 文件处理器（如果指定）
+
     if log_file:
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
-    
+
     return logger
 
-# ================= Excel文件操作 =================
+
 def read_excel(file_path):
-    """读取Excel文件
-    
-    Args:
-        file_path: Excel文件路径
-    
-    Returns:
-        pandas.DataFrame: 读取的数据
-    """
     try:
-        df = pd.read_excel(file_path).dropna(how='all').reset_index(drop=True)
-        return df
-    except Exception as e:
-        raise Exception(f"读取Excel文件失败: {e}")
+        return pd.read_excel(file_path).dropna(how="all").reset_index(drop=True)
+    except Exception as exc:
+        raise Exception(f"failed to read excel file: {exc}")
+
 
 def write_excel(data, file_path):
-    """写入Excel文件
-    
-    Args:
-        data: 要写入的数据列表
-        file_path: Excel文件路径
-    """
     try:
-        df = pd.DataFrame(data)
-        df.to_excel(file_path, index=False)
-    except Exception as e:
-        raise Exception(f"写入Excel文件失败: {e}")
+        pd.DataFrame(data).to_excel(file_path, index=False)
+    except Exception as exc:
+        raise Exception(f"failed to write excel file: {exc}")
 
-# ================= 文本处理 =================
+
 def clean_text(text):
-    """清理文本中的多余空白
-    
-    Args:
-        text: 原始文本
-    
-    Returns:
-        str: 清理后的文本
-    """
-    if not text:
+    if text is None or pd.isna(text):
         return ""
-    return re.sub(r'\s+', ' ', text).strip()
+    normalized = str(text)
+    if not normalized.strip():
+        return ""
+    return re.sub(r"\s+", " ", normalized).strip()
 
-# ================= URL构造 =================
+
 def build_detail_url(tid, pid):
-    """根据标准类型构造详情页URL
-    
-    Args:
-        tid: 标准类型ID
-        pid: 标准ID
-    
-    Returns:
-        str: 详情页URL
-    """
-    if tid == 'BV_GB':
+    if tid == "BV_GB":
         return f"https://std.samr.gov.cn/gb/search/gbDetailed?id={pid}"
-    elif tid == 'BV_HB':
+    if tid == "BV_HB":
         return f"https://std.samr.gov.cn/hb/search/stdHBDetailed?id={pid}"
-    elif tid == 'BV_DB':
+    if tid == "BV_DB":
         return f"https://std.samr.gov.cn/db/search/stdDBDetailed?id={pid}"
-    else:
-        return None
+    return None
 
-# ================= 目录操作 =================
+
 def ensure_dir(directory):
-    """确保目录存在，如果不存在则创建
-    
-    Args:
-        directory: 目录路径
-    """
     if not os.path.exists(directory):
         os.makedirs(directory, exist_ok=True)
 
-# ================= 标准类型判断 =================
+
+def normalize_detail_url(detail_url):
+    raw_value = str(detail_url or "").strip()
+    if not raw_value:
+        return None
+
+    cleaned = raw_value.strip(" \t\r\n\"'<>[](){}.,，。；;、")
+    parsed = urlparse(cleaned)
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return None
+    if parsed.netloc.lower() != "std.samr.gov.cn":
+        return None
+
+    canonical_path = next(
+        (path for path in _SUPPORTED_DETAIL_PATHS if parsed.path.lower() == path.lower()),
+        None,
+    )
+    if canonical_path is None:
+        return None
+
+    query = parse_qs(parsed.query)
+    standard_id = str((query.get("id") or [""])[0]).strip()
+    if not standard_id:
+        return None
+
+    return urlunparse(
+        (
+            "https",
+            "std.samr.gov.cn",
+            canonical_path,
+            "",
+            urlencode({"id": standard_id}),
+            "",
+        )
+    )
+
+
+def extract_detail_urls_from_text(text):
+    candidates = _DETAIL_URL_EXTRACT_PATTERN.findall(str(text or ""))
+    normalized = []
+    seen = set()
+    for candidate in candidates:
+        canonical = normalize_detail_url(candidate)
+        if not canonical or canonical in seen:
+            continue
+        seen.add(canonical)
+        normalized.append(canonical)
+    return normalized
+
+
+def infer_standard_type(detail_url=None, code=None):
+    canonical_url = normalize_detail_url(detail_url)
+    if canonical_url:
+        parsed = urlparse(canonical_url)
+        mapped_prefix = _SUPPORTED_DETAIL_PATHS.get(parsed.path)
+        if mapped_prefix:
+            return get_standard_type(mapped_prefix)
+    return get_standard_type(code)
+
+
 def get_standard_type(code):
-    """根据标准号判断标准类型
-    
-    Args:
-        code: 标准号
-    
-    Returns:
-        str: 标准类型（"国标"、"地标"或"行标"）
-    """
     if not code or pd.isna(code):
         return "行标"
     code_prefix = str(code).strip().upper()[:2]
     if code_prefix == "GB":
         return "国标"
-    elif code_prefix == "DB":
+    if code_prefix == "DB":
         return "地标"
-    else:
-        return "行标"
+    return "行标"
