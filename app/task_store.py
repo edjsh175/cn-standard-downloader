@@ -8,6 +8,8 @@ import pymysql
 import config
 from app.db_utils import build_business_table_sql, validate_table_name
 
+BUSINESS_REQUIRED_COLUMNS = {"standard_code", "chinese_name"}
+
 
 class TaskStore:
     def __init__(self):
@@ -66,10 +68,28 @@ class TaskStore:
             cursor.execute(tasks_sql)
             cursor.execute(items_sql)
 
+    @staticmethod
+    def _table_columns(cursor, table_name: str) -> set[str]:
+        cursor.execute(f"SHOW COLUMNS FROM `{table_name}`")
+        return {row[0] for row in cursor.fetchall()}
+
+    @staticmethod
+    def _is_business_table(cursor, table_name: str) -> bool:
+        try:
+            columns = TaskStore._table_columns(cursor, table_name)
+        except pymysql.MySQLError:
+            return False
+        return BUSINESS_REQUIRED_COLUMNS.issubset(columns)
+
     def ensure_business_table(self, table_name: str):
         sql = build_business_table_sql(table_name)
         with closing(self._connect()) as conn, closing(conn.cursor()) as cursor:
             cursor.execute(sql)
+            if not self._is_business_table(cursor, table_name):
+                raise ValueError(
+                    f"table_name '{table_name}' is not a supported business table; "
+                    "it must contain at least standard_code and chinese_name columns"
+                )
 
     def create_task(self, task_type: str, payload: dict[str, Any]) -> str:
         raw_table_name = str(payload.get("table_name") or "").strip()
@@ -100,7 +120,8 @@ class TaskStore:
         with closing(self._connect()) as conn, closing(conn.cursor()) as cursor:
             cursor.execute(sql)
             rows = cursor.fetchall()
-        return [row[0] for row in rows]
+            tables = [row[0] for row in rows]
+            return [table for table in tables if self._is_business_table(cursor, table)]
 
     def mark_running(self, task_id: str):
         sql = """
