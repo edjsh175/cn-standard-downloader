@@ -1,3 +1,19 @@
+FROM node:22-bookworm-slim AS web-build
+
+WORKDIR /web
+
+COPY web/package.json /web/package.json
+COPY web/package-lock.json /web/package-lock.json
+
+RUN npm ci
+
+COPY web/index.html /web/index.html
+COPY web/tsconfig.json /web/tsconfig.json
+COPY web/vite.config.ts /web/vite.config.ts
+COPY web/src /web/src
+
+RUN npm run build
+
 FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -37,6 +53,7 @@ COPY grab_module.py /app/grab_module.py
 COPY search_module.py /app/search_module.py
 COPY utils.py /app/utils.py
 COPY run_worker.py /app/run_worker.py
+COPY --from=web-build /web/dist /app/web/dist
 
 RUN useradd --create-home --shell /bin/bash appuser \
     && mkdir -p /app/artifacts /app/.tmp /app/temp_step2 /app/debug_output /app/pdf \

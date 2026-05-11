@@ -20,3 +20,5 @@ downloads
 captcha_step2.png
 config_user.json
 drivers
+web/node_modules
+web/dist

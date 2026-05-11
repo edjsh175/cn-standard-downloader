@@ -2,9 +2,14 @@
 
 ## Purpose
 
-Package the worker service as a headless Docker container so the crawler can run as an AI-callable execution engine on a local machine or server.
+Package the worker service and the browser-based control panel into one Docker deployment so the crawler can run on a local machine or server.
 
-This deployment target is for the worker HTTP service only. The legacy GUI remains a separate local debugging entrypoint and is not part of the container runtime.
+This deployment target includes:
+
+- The Python worker HTTP service
+- The Vue3 web console served by the same process
+
+The legacy GUI remains a separate local debugging entrypoint and is not part of the container runtime.
 
 ## Files
 
@@ -15,13 +20,41 @@ This deployment target is for the worker HTTP service only. The legacy GUI remai
 - `.env.test.example`
 - `docker/start-worker.sh`
 
+## Runtime Entry
+
+After deployment:
+
+- `GET /health` and `GET /api/health` are health checks
+- `/` serves the web console
+- `/api/*` serves the browser-facing API
+- Legacy `/tasks/*` endpoints remain available for compatibility
+
 ## Worker API
 
 - `GET /health`
+- `GET /api/health`
+- `GET /api/tables`
 - `POST /tasks`
+- `POST /api/tasks`
 - `GET /tasks/{task_id}`
+- `GET /api/tasks/{task_id}`
 - `GET /tasks/{task_id}/result`
+- `GET /api/tasks/{task_id}/result`
 - `POST /tasks/{task_id}/cancel`
+- `POST /api/tasks/{task_id}/cancel`
+
+Additional browser-facing download routes:
+
+- `GET /api/tasks/{task_id}/artifacts/search_results`
+- `GET /api/tasks/{task_id}/artifacts/failed_results`
+- `GET /api/tasks/{task_id}/artifacts/log_file`
+- `GET /api/tasks/{task_id}/items/{item_id}/pdf`
+
+Current task types:
+
+- `search_only`
+- `keyword_search`
+- `direct_grab`
 
 ## Deployment Model
 
@@ -42,14 +75,21 @@ Do not reuse the same database name, host artifact directory, or host temp direc
 
 ## First Run
 
-1. Create environment files from the templates.
+1. Pull the repository source code onto the target machine.
+
+```bash
+git clone <your-repo-url>
+cd <repo-dir>
+```
+
+2. Create environment files from the templates.
 
 ```bash
 cp .env.prod.example .env.prod
 cp .env.test.example .env.test
 ```
 
-2. Fill in the required settings in both files.
+3. Fill in the required settings in both files.
 
 - `STD_DB_HOST`
 - `STD_DB_PORT`
@@ -82,10 +122,12 @@ Notes:
 - On Docker Desktop, `STD_DB_HOST=host.docker.internal` is the usual choice when MySQL is on the host.
 - On Linux servers, point `STD_DB_HOST` to the actual reachable host or container address.
 - The test instance is intentionally bound to `127.0.0.1` so it is only reachable from the server itself.
+- The image is built locally from this repository. You do not need to manually clone any application image from a registry.
+- Docker will still pull base images required by the `Dockerfile` during the build if they do not already exist on the machine.
 
 ## Start Production
 
-Build and start the long-running production worker:
+Build and start the long-running production service:
 
 ```bash
 docker compose -p std-worker-prod --env-file .env.prod up -d --build
@@ -105,9 +147,14 @@ Expected response:
 {"status":"ok"}
 ```
 
+Open the web console:
+
+- Local on the server: `http://127.0.0.1:8765/`
+- Remote browser: `http://<server-ip>:8765/`
+
 ## Start Test
 
-Build and start the isolated test worker only when needed:
+Build and start the isolated test service only when needed:
 
 ```bash
 docker compose -p std-worker-test --env-file .env.test up -d --build
@@ -120,6 +167,10 @@ curl http://127.0.0.1:8766/health
 ```
 
 The test instance is not intended to be reachable from external machines.
+
+Open the test web console on the server itself:
+
+- `http://127.0.0.1:8766/`
 
 ## Check Status
 
@@ -175,6 +226,25 @@ curl http://127.0.0.1:<worker-port>/tasks/<task_id>
 curl http://127.0.0.1:<worker-port>/tasks/<task_id>/result
 ```
 
+Minimal search preview smoke task:
+
+```bash
+curl -X POST http://127.0.0.1:<worker-port>/api/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task_type": "search_only",
+    "keywords": ["人工智能"],
+    "per_keyword_limit": 5
+  }'
+```
+
+Browser smoke check:
+
+1. Open `http://127.0.0.1:<worker-port>/`
+2. Confirm the page loads
+3. Confirm the table list can be fetched
+4. Submit a `search_only` task from the page
+
 ## Artifacts
 
 The container mounts these paths back to the host:
@@ -201,8 +271,8 @@ For task inspection, check:
 ## Current Stage
 
 - The worker service is the primary runtime for AI or agent invocation.
+- The web console is available for browser-based manual operation.
 - The local GUI is still available for manual debugging.
-- A browser-based manual operations UI is a future direction and is not implemented in this repository yet.
 
 ## Long-Term Constraints
 

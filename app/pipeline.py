@@ -210,7 +210,7 @@ class PipelineRunner:
         search_result = None
 
         self._check_cancelled(task_id)
-        if task_type == "keyword_search":
+        if task_type in {"keyword_search", "search_only"}:
             search_result = search_standards_with_output(
                 keywords,
                 output_filename=search_output,
@@ -228,9 +228,53 @@ class PipelineRunner:
         else:
             raise ValueError(f"Unsupported task type: {task_type}")
 
-        self.task_store.upsert_task_items(task_id, items, item_status="pending")
+        initial_item_status = "preview" if task_type == "search_only" else "pending"
+        self.task_store.upsert_task_items(task_id, items, item_status=initial_item_status)
 
         search_summary = self._normalize_search_summary(search_result, items)
+
+        if task_type == "search_only":
+            return {
+                "task_id": task_id,
+                "status": "succeeded",
+                "summary": {
+                    "total": len(items),
+                    "succeeded": len(items),
+                    "failed": 0,
+                    "skipped": 0,
+                },
+                "inserted": 0,
+                "updated": 0,
+                "skipped": 0,
+                "search_summary": search_summary,
+                "artifacts": {
+                    "search_results": search_output if os.path.exists(search_output) else None,
+                    "failed_results": None,
+                    "log_file": task_log,
+                    "pdf_dir": overrides["pdf_dir"],
+                    "debug_dir": overrides["debug_dir"],
+                },
+                "db_write_summary": {
+                    "table_name": payload.get("table_name") or "",
+                    "duplicate_policy": payload.get("duplicate_policy", "overwrite"),
+                    "task_items": len(items),
+                    "saved_items": 0,
+                    "inserted": 0,
+                    "updated": 0,
+                    "skipped": 0,
+                    "failed": 0,
+                },
+                "download_summary": {
+                    "total_items": 0,
+                    "tracked_items": 0,
+                    "direct_download_used": 0,
+                    "download_url_resolved": 0,
+                    "session_extracted": 0,
+                    "pdf_saved": 0,
+                },
+                "errors": [],
+                "postprocess_status": "not_started",
+            }
 
         if not items:
             return {
@@ -249,7 +293,7 @@ class PipelineRunner:
                     "debug_dir": overrides["debug_dir"],
                 },
                 "db_write_summary": {
-                    "table_name": payload["table_name"],
+                    "table_name": payload.get("table_name") or "",
                     "duplicate_policy": payload.get("duplicate_policy", "overwrite"),
                     "task_items": 0,
                     "saved_items": 0,
@@ -347,7 +391,7 @@ class PipelineRunner:
                 "debug_dir": overrides["debug_dir"],
             },
             "db_write_summary": {
-                "table_name": payload["table_name"],
+                "table_name": payload.get("table_name") or "",
                 "duplicate_policy": payload.get("duplicate_policy", "overwrite"),
                 "task_items": len(items),
                 "saved_items": write_counts["inserted"] + write_counts["updated"],

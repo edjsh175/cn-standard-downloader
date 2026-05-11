@@ -72,8 +72,14 @@ class TaskStore:
             cursor.execute(sql)
 
     def create_task(self, task_type: str, payload: dict[str, Any]) -> str:
-        table_name = validate_table_name(payload["table_name"])
-        self.ensure_business_table(table_name)
+        raw_table_name = str(payload.get("table_name") or "").strip()
+        table_name = ""
+        if task_type == "search_only":
+            if raw_table_name:
+                table_name = validate_table_name(raw_table_name)
+        else:
+            table_name = validate_table_name(raw_table_name)
+            self.ensure_business_table(table_name)
         task_id = str(uuid.uuid4())
         sql = """
         INSERT INTO crawl_tasks (id, task_type, status, table_name, request_payload)
@@ -88,6 +94,13 @@ class TaskStore:
         with closing(self._connect()) as conn, closing(conn.cursor()) as cursor:
             cursor.execute(sql, params)
         return task_id
+
+    def list_tables(self):
+        sql = "SHOW TABLES"
+        with closing(self._connect()) as conn, closing(conn.cursor()) as cursor:
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+        return [row[0] for row in rows]
 
     def mark_running(self, task_id: str):
         sql = """
@@ -225,7 +238,7 @@ class TaskStore:
 
     def list_task_items(self, task_id: str):
         sql = """
-        SELECT detail_url, code, name, keyword, item_status, pdf_path, error_message, meta_payload
+        SELECT id, detail_url, code, name, keyword, item_status, pdf_path, error_message, meta_payload
         FROM crawl_task_items
         WHERE task_id=%s
         ORDER BY id ASC
@@ -236,3 +249,18 @@ class TaskStore:
         for row in rows:
             row["meta_payload"] = self._loads(row["meta_payload"])
         return rows
+
+    def get_task_item(self, task_id: str, item_id: int):
+        sql = """
+        SELECT id, detail_url, code, name, keyword, item_status, pdf_path, error_message, meta_payload
+        FROM crawl_task_items
+        WHERE task_id=%s AND id=%s
+        LIMIT 1
+        """
+        with closing(self._connect()) as conn, closing(conn.cursor(pymysql.cursors.DictCursor)) as cursor:
+            cursor.execute(sql, (task_id, item_id))
+            row = cursor.fetchone()
+        if not row:
+            return None
+        row["meta_payload"] = self._loads(row["meta_payload"])
+        return row
