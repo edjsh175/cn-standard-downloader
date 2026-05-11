@@ -103,6 +103,8 @@ cp .env.test.example .env.test
 - `STD_WORKER_PORT`
 - `STD_ARTIFACTS_DIR`
 - `STD_TMP_DIR`
+- `STD_WEB_BASE_PATH`
+- `STD_WEB_API_BASE_PATH`
 
 Required isolation defaults:
 
@@ -116,6 +118,10 @@ Required isolation defaults:
 - Test `STD_ARTIFACTS_DIR=./artifacts-test`
 - Production `STD_TMP_DIR=./.tmp-prod`
 - Test `STD_TMP_DIR=./.tmp-test`
+- Production `STD_WEB_BASE_PATH=/crawler/`
+- Production `STD_WEB_API_BASE_PATH=/crawler/api`
+- Test `STD_WEB_BASE_PATH=/`
+- Test `STD_WEB_API_BASE_PATH=/api`
 
 Notes:
 
