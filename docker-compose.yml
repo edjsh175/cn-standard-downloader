@@ -1,14 +1,11 @@
-name: std-worker
-
 services:
   std-worker:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: std-worker
     restart: unless-stopped
     ports:
-      - "${STD_WORKER_PORT:-8765}:8765"
+      - "${STD_BIND_IP:-0.0.0.0}:${STD_WORKER_PORT:-8765}:8765"
     environment:
       STD_DB_HOST: ${STD_DB_HOST}
       STD_DB_PORT: ${STD_DB_PORT:-3306}
@@ -27,8 +24,8 @@ services:
       STD_CHROMEDRIVER_PATH: /usr/bin/chromedriver
       STD_CHROME_BINARY: /usr/bin/chromium
     volumes:
-      - ./artifacts:/app/artifacts
-      - ./.tmp:/app/.tmp
+      - ${STD_ARTIFACTS_DIR:-./artifacts}:/app/artifacts
+      - ${STD_TMP_DIR:-./.tmp}:/app/.tmp
     extra_hosts:
       - "host.docker.internal:host-gateway"
     shm_size: "1gb"

@@ -8,9 +8,15 @@ env/
 
 # Local runtime state
 .env
+.env.*
+!.env.example
+!.env.prod.example
+!.env.test.example
 config_user.json
 .tmp/
+.tmp-*/
 artifacts/
+artifacts-*/
 debug_output/
 pdf/
 temp_step2/
