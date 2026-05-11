@@ -27,11 +27,12 @@ class PipelineRunner:
 
     def _build_overrides(self, payload: dict[str, Any], artifact_root: str) -> dict[str, Any]:
         runtime_root = os.path.join(config.get_base_dir(), ".tmp", "worker_runtime", os.path.basename(artifact_root))
+        headless_value = payload.get("headless")
         return {
             "pdf_dir": payload.get("pdf_dir") or os.path.join(artifact_root, "pdf"),
             "temp_dir": os.path.join(runtime_root, "temp"),
             "debug_dir": os.path.join(artifact_root, "debug"),
-            "headless_browser": bool(payload.get("headless", False)),
+            "headless_browser": config.HEADLESS_BROWSER if headless_value is None else bool(headless_value),
         }
 
     def _check_cancelled(self, task_id: str):

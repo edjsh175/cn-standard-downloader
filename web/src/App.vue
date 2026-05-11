@@ -174,6 +174,7 @@ async function runSearchOnly(mode: "full" | "search") {
     task_type: "search_only",
     keywords,
     per_keyword_limit: normalizedPerKeywordLimit(),
+    headless: true,
   };
   activePreviewItems.value = [];
   await submitTask(payload, mode === "full" ? "搜索预览任务已提交" : "搜索导出任务已提交");
