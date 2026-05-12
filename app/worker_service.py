@@ -124,11 +124,11 @@ class TaskWorkerService:
 
     @staticmethod
     def _artifact_url(task_id: str, artifact_name: str) -> str:
-        return f"/api/tasks/{task_id}/artifacts/{artifact_name}"
+        return f"api/tasks/{task_id}/artifacts/{artifact_name}"
 
     @staticmethod
     def _pdf_url(task_id: str, item_id: int) -> str:
-        return f"/api/tasks/{task_id}/items/{item_id}/pdf"
+        return f"api/tasks/{task_id}/items/{item_id}/pdf"
 
     def _artifact_path(self, task_id: str, artifact_name: str) -> str | None:
         task = self.task_store.get_task(task_id)
