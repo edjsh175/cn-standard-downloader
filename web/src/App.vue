@@ -358,6 +358,13 @@ onBeforeUnmount(() => {
 
         <div class="global-grid">
           <label class="field">
+            <select
+              :value="tables.includes(form.tableName) ? form.tableName : ''"
+              @change="form.tableName = ($event.target as HTMLSelectElement).value"
+            >
+              <option value="" disabled>{{ tables.length > 0 ? "璇烽€夋嫨宸叉湁琛ㄥ悕" : "鏆傛棤鍙€夎〃锛岃鎵嬪伐杈撳叆" }}</option>
+              <option v-for="table in tables" :key="`select-${table}`" :value="table">{{ table }}</option>
+            </select>
             <span>目标表名</span>
             <input v-model="form.tableName" list="table-options" placeholder="输入或选择业务表名" />
             <datalist id="table-options">
