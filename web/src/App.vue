@@ -358,18 +358,16 @@ onBeforeUnmount(() => {
 
         <div class="global-grid">
           <label class="field">
+            <span>目标表名</span>
             <select
               :value="tables.includes(form.tableName) ? form.tableName : ''"
               @change="form.tableName = ($event.target as HTMLSelectElement).value"
             >
-              <option value="" disabled>{{ tables.length > 0 ? "璇烽€夋嫨宸叉湁琛ㄥ悕" : "鏆傛棤鍙€夎〃锛岃鎵嬪伐杈撳叆" }}</option>
+              <option value="" disabled>{{ tables.length > 0 ? "选择已有表名" : "暂无可选表，请输入新表名" }}</option>
               <option v-for="table in tables" :key="`select-${table}`" :value="table">{{ table }}</option>
             </select>
-            <span>目标表名</span>
-            <input v-model="form.tableName" list="table-options" placeholder="输入或选择业务表名" />
-            <datalist id="table-options">
-              <option v-for="table in tables" :key="table" :value="table">{{ table }}</option>
-            </datalist>
+            <small>也可以直接输入一个新的业务表名，系统会自动创建。</small>
+            <input v-model="form.tableName" placeholder="输入新业务表名（可选）" />
           </label>
 
           <label class="field">
