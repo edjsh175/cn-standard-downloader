@@ -5,7 +5,7 @@ import queue
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import config
 
@@ -301,7 +301,10 @@ class WorkerRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         if as_attachment:
-            self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
+            fallback_name = download_name.encode("ascii", "ignore").decode("ascii").replace('"', "_") or "download"
+            encoded_name = quote(download_name, safe="")
+            disposition = f"attachment; filename=\"{fallback_name}\"; filename*=UTF-8''{encoded_name}"
+            self.send_header("Content-Disposition", disposition)
         self.end_headers()
         self.wfile.write(data)
 
