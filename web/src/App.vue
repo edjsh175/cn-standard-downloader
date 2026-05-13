@@ -29,6 +29,9 @@ const recentTaskIds = ref<string[]>([]);
 const activeTaskId = ref("");
 const activeTaskResult = ref<TaskResultResponse | null>(null);
 const activePreviewItems = ref<TaskItem[]>([]);
+const activePreviewTaskId = ref("");
+const previewSelections = ref<Record<string, boolean>>({});
+const isBulkDownloading = ref(false);
 const pollingTimer = ref<number | null>(null);
 
 const form = reactive({
@@ -47,10 +50,23 @@ const activeArtifacts = computed(() => activeTaskResult.value?.result?.artifact_
 const activeErrors = computed(() => activeTaskResult.value?.result?.errors ?? []);
 const activeDownloadSummary = computed(() => activeTaskResult.value?.result?.download_summary ?? null);
 const activeSearchSummary = computed(() => activeTaskResult.value?.result?.search_summary ?? null);
+const downloadablePdfItems = computed(() => activeTaskResult.value?.items.filter((item) => Boolean(item.pdf_download_url)) ?? []);
+const previewSelectedCount = computed(
+  () => activePreviewItems.value.filter((item) => previewSelections.value[previewItemKey(item)]).length,
+);
+const previewAllSelected = computed(
+  () =>
+    activePreviewItems.value.length > 0 &&
+    activePreviewItems.value.every((item) => previewSelections.value[previewItemKey(item)]),
+);
+const previewPartiallySelected = computed(
+  () => previewSelectedCount.value > 0 && previewSelectedCount.value < activePreviewItems.value.length,
+);
 const previewReady = computed(
   () =>
     activeTab.value === "full" &&
     activeTaskResult.value?.status === "succeeded" &&
+    activeTaskId.value === activePreviewTaskId.value &&
     activePreviewItems.value.length > 0,
 );
 const detectedUrlCount = computed(() => extractDetailUrls(form.urlText).length);
@@ -87,6 +103,49 @@ function extractDetailUrls(text: string): string[] {
 
 function isTerminalStatus(status?: string | null): boolean {
   return Boolean(status && terminalStates.has(status));
+}
+
+function previewItemKey(item: Pick<TaskItem, "detail_url">): string {
+  return item.detail_url;
+}
+
+function clearPreviewState() {
+  activePreviewTaskId.value = "";
+  activePreviewItems.value = [];
+  previewSelections.value = {};
+}
+
+function syncPreviewState(taskId: string, items: TaskItem[]) {
+  const sameTask = activePreviewTaskId.value === taskId;
+  const nextSelections: Record<string, boolean> = {};
+  for (const item of items) {
+    const key = previewItemKey(item);
+    nextSelections[key] = sameTask ? previewSelections.value[key] ?? true : true;
+  }
+  activePreviewTaskId.value = taskId;
+  activePreviewItems.value = items;
+  previewSelections.value = nextSelections;
+}
+
+function setAllPreviewSelections(selected: boolean) {
+  const nextSelections: Record<string, boolean> = {};
+  for (const item of activePreviewItems.value) {
+    nextSelections[previewItemKey(item)] = selected;
+  }
+  previewSelections.value = nextSelections;
+}
+
+function updatePreviewSelection(item: TaskItem, selected: boolean) {
+  previewSelections.value = {
+    ...previewSelections.value,
+    [previewItemKey(item)]: selected,
+  };
+}
+
+function delay(ms: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
 function saveRecentTask(taskId: string) {
@@ -134,8 +193,14 @@ async function loadTask(taskId: string, keepPolling = true) {
   const result = await fetchTaskResult(taskId);
   activeTaskId.value = taskId;
   activeTaskResult.value = result;
-  if (result.result?.search_summary && result.items.length > 0) {
-    activePreviewItems.value = result.items;
+  const isPreviewTask =
+    result.status === "succeeded" &&
+    result.items.length > 0 &&
+    result.items.every((item) => item.item_status === "preview");
+  if (isPreviewTask) {
+    syncPreviewState(taskId, result.items);
+  } else {
+    clearPreviewState();
   }
 
   if (keepPolling && !isTerminalStatus(result.status)) {
@@ -177,7 +242,7 @@ async function runSearchOnly(mode: "full" | "search") {
     per_keyword_limit: normalizedPerKeywordLimit(),
     headless: true,
   };
-  activePreviewItems.value = [];
+  clearPreviewState();
   await submitTask(payload, mode === "full" ? "搜索预览任务已提交" : "搜索导出任务已提交");
 }
 
@@ -186,11 +251,16 @@ async function continueWithPreviewGrab() {
     setBanner("当前没有可继续抓取的预览结果", "error");
     return;
   }
+  const selectedPreviewItems = activePreviewItems.value.filter((item) => previewSelections.value[previewItemKey(item)]);
+  if (selectedPreviewItems.length === 0) {
+    setBanner("请至少勾选一条预览结果再继续抓取", "error");
+    return;
+  }
   if (!form.tableName.trim()) {
     setBanner("请选择或输入目标表名", "error");
     return;
   }
-  const items = activePreviewItems.value.map((item) => ({
+  const items = selectedPreviewItems.map((item) => ({
     detail_url: item.detail_url,
     code: item.code ?? "",
     name: item.name ?? "",
@@ -206,6 +276,32 @@ async function continueWithPreviewGrab() {
     },
     "抓取任务已提交",
   );
+}
+
+async function downloadAllPdf() {
+  if (downloadablePdfItems.value.length === 0) {
+    setBanner("当前任务没有可下载 PDF", "error");
+    return;
+  }
+  isBulkDownloading.value = true;
+  try {
+    for (const item of downloadablePdfItems.value) {
+      if (!item.pdf_download_url) {
+        continue;
+      }
+      const anchor = document.createElement("a");
+      anchor.href = item.pdf_download_url;
+      anchor.style.display = "none";
+      anchor.rel = "noreferrer";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      await delay(250);
+    }
+    setBanner(`已开始批量下载 ${downloadablePdfItems.value.length} 个 PDF，如浏览器提示请允许多文件下载`, "success");
+  } finally {
+    isBulkDownloading.value = false;
+  }
 }
 
 async function runDirectGrabFromExcel() {
@@ -417,11 +513,65 @@ onBeforeUnmount(() => {
               <button
                 v-if="activeTab === 'full'"
                 class="accent-btn"
-                :disabled="isSubmitting || !previewReady"
+                :disabled="isSubmitting || !previewReady || previewSelectedCount === 0"
                 @click="continueWithPreviewGrab"
               >
                 用当前预览结果继续抓取
               </button>
+            </div>
+
+            <div v-if="activeTab === 'full' && previewReady" class="detail-block preview-block">
+              <div class="detail-head">
+                <div>
+                  <h3>预览结果</h3>
+                  <p>默认全部勾选。取消勾选的条目不会进入后续抓取。</p>
+                </div>
+                <div class="selection-toolbar">
+                  <label class="checkbox-pill">
+                    <input
+                      type="checkbox"
+                      :checked="previewAllSelected"
+                      :indeterminate.prop="previewPartiallySelected"
+                      @change="setAllPreviewSelections(($event.target as HTMLInputElement).checked)"
+                    />
+                    <span>全选</span>
+                  </label>
+                  <button class="ghost-btn compact-btn" type="button" @click="setAllPreviewSelections(true)">全选</button>
+                  <button class="ghost-btn compact-btn" type="button" @click="setAllPreviewSelections(false)">全不选</button>
+                  <span class="selection-summary">已选 {{ previewSelectedCount }} / {{ activePreviewItems.length }}</span>
+                </div>
+              </div>
+
+              <div class="table-shell">
+                <table>
+                  <thead>
+                    <tr>
+                      <th class="checkbox-col">选择</th>
+                      <th>编号</th>
+                      <th>名称</th>
+                      <th>关键词</th>
+                      <th>详情页</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="item in activePreviewItems" :key="item.id">
+                      <td class="checkbox-col">
+                        <input
+                          type="checkbox"
+                          :checked="previewSelections[previewItemKey(item)] ?? true"
+                          @change="updatePreviewSelection(item, ($event.target as HTMLInputElement).checked)"
+                        />
+                      </td>
+                      <td>{{ item.code || "-" }}</td>
+                      <td>{{ item.name || "-" }}</td>
+                      <td>{{ item.keyword || "-" }}</td>
+                      <td>
+                        <a :href="item.detail_url" target="_blank" rel="noreferrer">打开</a>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
           </template>
 
@@ -568,7 +718,20 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="detail-block">
-            <h3>任务明细</h3>
+            <div class="detail-head">
+              <div>
+                <h3>任务明细</h3>
+                <p>成功条目可单独下载 PDF，也可以一次性触发当前任务的全部 PDF 下载。</p>
+              </div>
+              <button
+                class="ghost-btn compact-btn"
+                type="button"
+                :disabled="isBulkDownloading || downloadablePdfItems.length === 0"
+                @click="downloadAllPdf"
+              >
+                {{ isBulkDownloading ? "批量下载中..." : `下载全部 PDF（${downloadablePdfItems.length}）` }}
+              </button>
+            </div>
             <div class="table-shell">
               <table>
                 <thead>

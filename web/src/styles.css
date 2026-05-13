@@ -283,6 +283,10 @@ select {
   border: 1px solid rgba(77, 56, 34, 0.16);
 }
 
+.compact-btn {
+  padding: 10px 16px;
+}
+
 .upload-card {
   display: grid;
   gap: 12px;
@@ -332,6 +336,72 @@ select {
   color: var(--accent);
 }
 
+.detail-block {
+  display: grid;
+  gap: 14px;
+  margin-top: 20px;
+}
+
+.detail-block h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.detail-block p {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+.detail-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.detail-head > div:first-child {
+  min-width: 0;
+}
+
+.selection-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.selection-summary {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.checkbox-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid rgba(77, 56, 34, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 250, 243, 0.8);
+}
+
+.checkbox-col {
+  width: 72px;
+}
+
+.checkbox-col input {
+  width: 18px;
+  height: 18px;
+}
+
+.preview-block {
+  padding: 18px;
+  border: 1px solid rgba(77, 56, 34, 0.1);
+  border-radius: 22px;
+  background: rgba(255, 250, 243, 0.64);
+}
+
 .recent-list {
   display: grid;
   gap: 10px;
@@ -356,6 +426,60 @@ select {
   color: var(--muted);
   word-break: break-all;
   font-size: 12px;
+}
+
+.table-shell {
+  overflow-x: auto;
+}
+
+.table-shell table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 760px;
+}
+
+.table-shell th,
+.table-shell td {
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(77, 56, 34, 0.1);
+  text-align: left;
+  vertical-align: top;
+}
+
+.table-shell th {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.table-shell tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.error-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.error-list li {
+  color: var(--ink);
+}
+
+.error-list span {
+  color: var(--muted);
+  margin-left: 8px;
+}
+
+@media (max-width: 1080px) {
+  .detail-head {
+    flex-direction: column;
+  }
+
+  .selection-toolbar {
+    justify-content: flex-start;
+  }
 }
 
 .summary-grid {
