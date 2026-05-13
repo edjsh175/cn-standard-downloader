@@ -3,8 +3,9 @@ import os
 import re
 import shutil
 import time
+from html import unescape
 from hashlib import md5
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import pandas as pd
 import pymysql
@@ -851,6 +852,9 @@ class BatchCrawler:
         return sorted(unique.values(), key=lambda item: item.get("score", 0), reverse=True)
 
     def _extract_interstitial_download_candidate(self):
+        if self._read_browser_error_page() is not None:
+            return None
+
         try:
             reload_button = self.driver.find_element(By.ID, "reload-button")
         except Exception:
@@ -870,6 +874,49 @@ class BatchCrawler:
             "content_type": None,
             "score": 200,
         }
+
+    def _read_browser_error_page(self):
+        try:
+            page_source = self.driver.page_source or ""
+        except Exception:
+            return None
+
+        if 'id="main-frame-error"' not in page_source:
+            return None
+
+        error_code_match = re.search(r'"errorCode":"([^"]+)"', page_source)
+        reload_url_match = re.search(r'"reloadUrl":"([^"]+)"', page_source)
+
+        title = ""
+        try:
+            title = (self.driver.title or "").strip()
+        except Exception:
+            pass
+
+        return {
+            "title": title,
+            "current_url": self._safe_current_url(""),
+            "error_code": error_code_match.group(1) if error_code_match else "",
+            "reload_url": unescape(reload_url_match.group(1)) if reload_url_match else "",
+        }
+
+    def _raise_browser_error_page(self, summary):
+        browser_error = self._read_browser_error_page()
+        if browser_error is None:
+            return
+
+        request_url = browser_error.get("reload_url") or browser_error.get("current_url") or ""
+        parsed = urlparse(request_url)
+        endpoint = parsed.netloc or browser_error.get("title") or "download endpoint"
+        error_code = browser_error.get("error_code") or "BROWSER_NET_ERROR"
+
+        if request_url:
+            summary["request_url"] = request_url
+            summary["request_method"] = "GET"
+            summary["download_url_resolved"] = True
+        summary["transport"] = "browser_error_page"
+        summary["error_stage"] = "upstream_unavailable"
+        raise RuntimeError(f"national standard download endpoint unavailable: {endpoint} returned {error_code}")
 
     def _standard_unpublic_reason(self, standard_type, current_xpaths):
         if standard_type == "国标":
@@ -964,7 +1011,19 @@ class BatchCrawler:
             )
             dst_pdf = self.get_pdf_save_path(meta, meta.get("code"), meta.get("name"))
             referer = row.get("detail_url") or self._safe_current_url("")
-            return self._download_via_session(interstitial_candidate, dst_pdf, referer, summary)
+            try:
+                return self._download_via_session(interstitial_candidate, dst_pdf, referer, summary)
+            except Exception as exc:
+                summary["error_stage"] = "direct_download"
+                summary["transport"] = "browser_download_fallback"
+                summary["pdf_saved"] = False
+                self.logger.warning(f"direct download failed, fallback to browser temp download: {exc}")
+                fallback_pdf = self._move_downloaded_pdf_from_temp(dst_pdf, summary)
+                if fallback_pdf:
+                    return fallback_pdf
+                raise
+
+        self._raise_browser_error_page(summary)
 
         captcha_img_xpath = current_xpaths.get("captcha_img")
         captcha_input_xpath = current_xpaths.get("captcha_input")
