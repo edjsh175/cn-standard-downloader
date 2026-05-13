@@ -10,4 +10,4 @@ export VITE_API_BASE_PATH="${STD_WEB_API_BASE_PATH:-/crawler/api}"
 npm run build
 
 cd "$REPO_ROOT"
-docker compose -p std-worker-prod -f docker-compose.yml -f docker-compose.server.override.yml --env-file .env.prod up -d --build
+sudo docker compose -p std-worker-prod -f docker-compose.yml -f docker-compose.server.override.yml --env-file .env.prod up -d --build
