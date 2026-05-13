@@ -227,6 +227,11 @@ class BatchCrawler:
         if detail_url:
             self.download_summaries[detail_url] = dict(summary)
 
+    def _has_failed_item(self, detail_url):
+        if not detail_url:
+            return False
+        return any(item.get("detail_url") == detail_url for item in self.failed_items)
+
     def _first_non_empty_text(self, xpath_candidates):
         for xpath in xpath_candidates:
             try:
@@ -1110,7 +1115,6 @@ class BatchCrawler:
         meta["type"] = standard_type
         meta["ps"] = "metadata extracted"
         final_pdf = ""
-        should_save = False
         download_summary = self._new_download_summary(row, standard_type)
 
         try:
@@ -1150,8 +1154,6 @@ class BatchCrawler:
                 meta["ps"] = "metadata extraction failed: standard code missing"
                 self._add_failed_item(meta, meta["ps"])
                 return
-
-            should_save = True
 
             fast_meta = self.quick_extract_meta(
                 {
@@ -1202,7 +1204,13 @@ class BatchCrawler:
             meta["download_summary"] = download_summary
             self._record_download_summary(detail_url, download_summary)
             self.safe_close_window(main_handle)
-            if should_save and meta.get("code"):
+            should_save = (
+                bool(meta.get("code"))
+                and bool(final_pdf)
+                and bool(download_summary.get("pdf_saved"))
+                and not self._has_failed_item(detail_url)
+            )
+            if should_save:
                 self.save_db(meta, final_pdf)
 
     def run(self, excel_file=None, generate_failed_output=False, failed_keywords=None):

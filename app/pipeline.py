@@ -92,6 +92,8 @@ class PipelineRunner:
             pdf_path = saved.get("pdf_path")
             write_result = saved.get("write_result") or {}
             failure = unique_failures.get(detail_url)
+            download_summary = (meta.get("download_summary") or {}) if isinstance(meta, dict) else {}
+            pdf_saved = bool(pdf_path) and bool(download_summary.get("pdf_saved"))
 
             if failure:
                 failure_count += 1
@@ -112,7 +114,7 @@ class PipelineRunner:
                     error_message=failure.get("fail_reason"),
                     meta_payload=meta,
                 )
-            elif detail_url in saved_results:
+            elif detail_url in saved_results and pdf_saved:
                 success_count += 1
                 item_status = str(write_result.get("status") or "succeeded")
                 if item_status in write_counts:
@@ -127,7 +129,7 @@ class PipelineRunner:
             else:
                 failure_count += 1
                 write_counts["failed"] += 1
-                message = "No database write record captured for this item"
+                message = "No successful PDF download or database write record captured for this item"
                 errors.append(
                     {
                         "detail_url": detail_url,
