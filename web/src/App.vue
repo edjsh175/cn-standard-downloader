@@ -8,6 +8,7 @@ type TabKey = "full" | "search" | "excel" | "url";
 
 const POLL_INTERVAL_MS = 3000;
 const LOCAL_STORAGE_KEY = "gb-crawler-recent-task-ids";
+const DEFAULT_TABLE_NAME = "gb_standards";
 const terminalStates = new Set(["succeeded", "failed", "partial_failed", "cancelled"]);
 
 const tabs: Array<{ key: TabKey; label: string; caption: string }> = [
@@ -33,7 +34,7 @@ const pollingTimer = ref<number | null>(null);
 const form = reactive({
   keywordsText: "",
   perKeywordLimit: "",
-  tableName: "",
+  tableName: DEFAULT_TABLE_NAME,
   duplicatePolicy: "overwrite" as DuplicatePolicy,
   urlText: "",
   excelFileName: "",
@@ -111,8 +112,8 @@ async function refreshTables() {
   isLoadingTables.value = true;
   try {
     tables.value = await fetchTables();
-    if (!form.tableName && tables.value.length > 0) {
-      form.tableName = tables.value[0];
+    if (!form.tableName.trim()) {
+      form.tableName = tables.value[0] ?? DEFAULT_TABLE_NAME;
     }
     setBanner(`已读取 ${tables.value.length} 个数据库表`, "success");
   } catch (error) {
@@ -363,11 +364,11 @@ onBeforeUnmount(() => {
               :value="tables.includes(form.tableName) ? form.tableName : ''"
               @change="form.tableName = ($event.target as HTMLSelectElement).value"
             >
-              <option value="" disabled>{{ tables.length > 0 ? "选择已有表名" : "暂无可选表，请输入新表名" }}</option>
+              <option value="" disabled>{{ tables.length > 0 ? "选择已有爬虫业务表" : "暂无兼容表，请输入新表名" }}</option>
               <option v-for="table in tables" :key="`select-${table}`" :value="table">{{ table }}</option>
             </select>
-            <small>也可以直接输入一个新的业务表名，系统会自动创建。</small>
-            <input v-model="form.tableName" placeholder="输入新业务表名（可选）" />
+            <small>推荐使用爬虫自己的业务表；如输入新表名，系统会按标准结构自动创建，不建议写入 GeoAI 历史元数据表。</small>
+            <input v-model="form.tableName" placeholder="输入新业务表名，默认使用 gb_standards" />
           </label>
 
           <label class="field">

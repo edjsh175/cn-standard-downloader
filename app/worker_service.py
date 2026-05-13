@@ -11,7 +11,7 @@ import config
 
 from app.db_utils import validate_table_name
 from app.pipeline import PipelineRunner
-from app.task_store import TaskStore
+from app.task_store import DEFAULT_BUSINESS_TABLE_NAME, TaskStore
 from utils import extract_detail_urls_from_text, normalize_detail_url
 
 
@@ -73,7 +73,8 @@ class TaskWorkerService:
             raise ValueError("task_type must be keyword_search, direct_grab, or search_only")
 
         if task_type in {"keyword_search", "direct_grab"}:
-            table_name = validate_table_name(payload.get("table_name"))
+            raw_table_name = str(payload.get("table_name") or "").strip()
+            table_name = validate_table_name(raw_table_name or DEFAULT_BUSINESS_TABLE_NAME)
             payload["table_name"] = table_name
             payload["duplicate_policy"] = self._normalize_duplicate_policy(payload.get("duplicate_policy"))
         else:

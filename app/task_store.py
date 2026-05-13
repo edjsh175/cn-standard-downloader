@@ -8,12 +8,32 @@ import pymysql
 import config
 from app.db_utils import build_business_table_sql, validate_table_name
 
-BUSINESS_REQUIRED_COLUMNS = {"standard_code", "chinese_name"}
+DEFAULT_BUSINESS_TABLE_NAME = "gb_standards"
+BUSINESS_REQUIRED_COLUMNS = {
+    "id",
+    "standard_code",
+    "keyword",
+    "draft_unit",
+    "drafter",
+    "chinese_name",
+    "english_name",
+    "release_date",
+    "implement_date",
+    "release_unit",
+    "charge_unit",
+    "replace_standard",
+    "standard_status",
+    "application_scope",
+    "reference_standard",
+    "pdf_path",
+    "ps",
+}
 
 
 class TaskStore:
     def __init__(self):
         self.ensure_task_tables()
+        self.ensure_business_table(DEFAULT_BUSINESS_TABLE_NAME)
 
     def _connect(self):
         return pymysql.connect(**config.DB_CONFIG, charset="utf8mb4", autocommit=True)
@@ -87,8 +107,8 @@ class TaskStore:
             cursor.execute(sql)
             if not self._is_business_table(cursor, table_name):
                 raise ValueError(
-                    f"table_name '{table_name}' is not a supported business table; "
-                    "it must contain at least standard_code and chinese_name columns"
+                    f"table_name '{table_name}' is not a compatible crawler business table; "
+                    f"use '{DEFAULT_BUSINESS_TABLE_NAME}' or another table created by the crawler"
                 )
 
     def create_task(self, task_type: str, payload: dict[str, Any]) -> str:
@@ -98,7 +118,8 @@ class TaskStore:
             if raw_table_name:
                 table_name = validate_table_name(raw_table_name)
         else:
-            table_name = validate_table_name(raw_table_name)
+            table_name = validate_table_name(raw_table_name or DEFAULT_BUSINESS_TABLE_NAME)
+            payload["table_name"] = table_name
             self.ensure_business_table(table_name)
         task_id = str(uuid.uuid4())
         sql = """
