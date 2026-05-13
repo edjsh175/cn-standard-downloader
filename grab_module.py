@@ -83,6 +83,7 @@ class BatchCrawler:
         self.failed_items = []
         self.download_summaries = {}
         self.write_results = {}
+        self.processed_results = {}
         self.setup_env()
         self.cjy = Chaojiying_Client(CHAOJIYING_USER, CHAOJIYING_PASS, CHAOJIYING_SOFT_ID)
 
@@ -1203,6 +1204,12 @@ class BatchCrawler:
             download_summary["debug_files"] = [path for path in download_summary["debug_files"] if path]
             meta["download_summary"] = download_summary
             self._record_download_summary(detail_url, download_summary)
+            if detail_url:
+                meta_snapshot = dict(meta)
+                self.processed_results[detail_url] = {
+                    "meta": meta_snapshot,
+                    "pdf_path": final_pdf or "",
+                }
             self.safe_close_window(main_handle)
             should_save = (
                 bool(meta.get("code"))

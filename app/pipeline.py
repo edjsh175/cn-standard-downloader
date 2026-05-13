@@ -75,7 +75,7 @@ class PipelineRunner:
             )
         return normalized
 
-    def _finalize_task_items(self, task_id, items, saved_results, failed_items):
+    def _finalize_task_items(self, task_id, items, saved_results, processed_results, failed_items):
         unique_failures = {}
         for item in failed_items:
             unique_failures[item["detail_url"]] = item
@@ -87,7 +87,7 @@ class PipelineRunner:
 
         for item in items:
             detail_url = item["detail_url"]
-            saved = saved_results.get(detail_url) or {}
+            saved = saved_results.get(detail_url) or processed_results.get(detail_url) or {}
             meta = saved.get("meta") or item
             pdf_path = saved.get("pdf_path")
             write_result = saved.get("write_result") or {}
@@ -354,13 +354,14 @@ class PipelineRunner:
             if crawler.failed_items:
                 with working_directory(artifact_root):
                     failed_artifact_name = crawler.generate_failed_excel(keywords=keywords or None)
-            self._finalize_task_items(task_id, items, saved_results, crawler.failed_items)
+            self._finalize_task_items(task_id, items, saved_results, crawler.processed_results, crawler.failed_items)
             raise
 
         success_count, failure_count, write_counts, errors = self._finalize_task_items(
             task_id,
             items,
             saved_results,
+            crawler.processed_results,
             crawler.failed_items,
         )
         download_summary = (crawl_result or {}).get("download_summary") or self._summarize_downloads(
