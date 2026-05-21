@@ -967,6 +967,9 @@ class BatchCrawler:
             meta["ps"] = "missing view_text button xpath"
             return False
 
+        if current_xpaths.get("download_standard_btn"):
+            view_text_xpath = "//*[contains(concat(' ', normalize-space(@class), ' '), ' openpdf ')]"
+
         view_buttons = self.driver.find_elements(By.XPATH, view_text_xpath)
         if not view_buttons:
             meta["ps"] = f"view text button not found: {view_text_xpath}"
