@@ -195,10 +195,34 @@ class TaskWorkerService:
         normalized = []
         for item in items:
             row = dict(item)
+            meta = row.get("meta_payload")
+            if isinstance(meta, dict):
+                for key in ("code", "name", "keyword"):
+                    value = str(meta.get(key) or "").strip()
+                    if value and not row.get(key):
+                        row[key] = value
             if row.get("pdf_path"):
                 row["pdf_download_url"] = self._pdf_url(task_id, int(row["id"]))
             normalized.append(row)
         return normalized
+
+    @staticmethod
+    def _attach_error_display_fields(result_payload: dict | None, items: list[dict]):
+        if result_payload is None:
+            return None
+        payload = dict(result_payload)
+        item_by_url = {item.get("detail_url"): item for item in items}
+        errors = []
+        for error in payload.get("errors") or []:
+            row = dict(error)
+            item = item_by_url.get(row.get("detail_url")) or {}
+            for key in ("code", "name"):
+                if not row.get(key) and item.get(key):
+                    row[key] = item[key]
+            errors.append(row)
+        if errors:
+            payload["errors"] = errors
+        return payload
 
     def get_task(self, task_id: str):
         task = self.task_store.get_task(task_id)
@@ -212,11 +236,14 @@ class TaskWorkerService:
         task = self.task_store.get_task(task_id)
         if not task:
             return None
+        items = self._attach_item_urls(task_id, self.task_store.list_task_items(task_id))
+        result = self._attach_result_urls(task_id, task.get("result_payload"))
+        result = self._attach_error_display_fields(result, items)
         return {
             "task_id": task["id"],
             "status": task["status"],
-            "result": self._attach_result_urls(task_id, task.get("result_payload")),
-            "items": self._attach_item_urls(task_id, self.task_store.list_task_items(task_id)),
+            "result": result,
+            "items": items,
             "error_message": task["error_message"],
         }
 

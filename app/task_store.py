@@ -268,15 +268,37 @@ class TaskStore:
         pdf_path: str | None = None,
         error_message: str | None = None,
         meta_payload: dict[str, Any] | None = None,
+        code: str | None = None,
+        name: str | None = None,
+        keyword: str | None = None,
     ):
         sql = """
         UPDATE crawl_task_items
-        SET item_status=%s, pdf_path=%s, error_message=%s, meta_payload=%s
+        SET item_status=%s,
+            pdf_path=%s,
+            error_message=%s,
+            meta_payload=%s,
+            code=COALESCE(%s, code),
+            name=COALESCE(%s, name),
+            keyword=COALESCE(%s, keyword)
         WHERE task_id=%s AND detail_url=%s
         """
         payload = self._dumps(meta_payload) if meta_payload is not None else None
         with closing(self._connect()) as conn, closing(conn.cursor()) as cursor:
-            cursor.execute(sql, (item_status, pdf_path, error_message, payload, task_id, detail_url))
+            cursor.execute(
+                sql,
+                (
+                    item_status,
+                    pdf_path,
+                    error_message,
+                    payload,
+                    code,
+                    name,
+                    keyword,
+                    task_id,
+                    detail_url,
+                ),
+            )
 
     def list_task_items(self, task_id: str):
         sql = """

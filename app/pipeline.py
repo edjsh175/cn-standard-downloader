@@ -75,6 +75,21 @@ class PipelineRunner:
             )
         return normalized
 
+    @staticmethod
+    def _resolved_item_fields(item: dict[str, Any], meta: dict[str, Any] | None):
+        source = meta if isinstance(meta, dict) else {}
+
+        def resolved(key: str):
+            value = source.get(key) or item.get(key)
+            text = str(value or "").strip()
+            return text or None
+
+        return {
+            "code": resolved("code"),
+            "name": resolved("name"),
+            "keyword": resolved("keyword"),
+        }
+
     def _finalize_task_items(self, task_id, items, saved_results, processed_results, failed_items):
         unique_failures = {}
         for item in failed_items:
@@ -94,6 +109,7 @@ class PipelineRunner:
             failure = unique_failures.get(detail_url)
             download_summary = (meta.get("download_summary") or {}) if isinstance(meta, dict) else {}
             pdf_saved = bool(pdf_path) and bool(download_summary.get("pdf_saved"))
+            resolved_fields = self._resolved_item_fields(item, meta)
 
             if failure:
                 failure_count += 1
@@ -101,7 +117,7 @@ class PipelineRunner:
                 errors.append(
                     {
                         "detail_url": detail_url,
-                        "code": item.get("code"),
+                        "code": resolved_fields["code"],
                         "error_type": failure.get("error_type"),
                         "message": failure.get("fail_reason"),
                     }
@@ -113,6 +129,7 @@ class PipelineRunner:
                     pdf_path=pdf_path,
                     error_message=failure.get("fail_reason"),
                     meta_payload=meta,
+                    **resolved_fields,
                 )
             elif detail_url in saved_results and pdf_saved:
                 success_count += 1
@@ -125,6 +142,7 @@ class PipelineRunner:
                     item_status=item_status,
                     pdf_path=pdf_path,
                     meta_payload=meta,
+                    **resolved_fields,
                 )
             else:
                 failure_count += 1
@@ -133,7 +151,7 @@ class PipelineRunner:
                 errors.append(
                     {
                         "detail_url": detail_url,
-                        "code": item.get("code"),
+                        "code": resolved_fields["code"],
                         "error_type": "unknown",
                         "message": message,
                     }
@@ -144,6 +162,7 @@ class PipelineRunner:
                     item_status="failed",
                     error_message=message,
                     meta_payload=meta,
+                    **resolved_fields,
                 )
 
         return success_count, failure_count, write_counts, errors
