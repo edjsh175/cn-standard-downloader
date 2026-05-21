@@ -264,6 +264,26 @@ class BatchCrawler:
         name = cleaned[match.end():].strip(" :-：|_/")
         return code, clean_text(name)
 
+    def _extract_name_from_current_standard_panel(self, code):
+        if not code:
+            return ""
+
+        try:
+            html = self.driver.page_source or ""
+        except Exception:
+            return ""
+
+        pattern = re.compile(
+            rf"{re.escape(code)}[\s\S]{{0,1200}}?<div[^>]*class=[\"'][^\"']*replA[^\"']*[\"'][^>]*>([\s\S]*?)</div>",
+            re.IGNORECASE,
+        )
+        for match in pattern.finditer(html):
+            candidate = re.sub(r"<[^>]+>", " ", match.group(1))
+            candidate = clean_text(unescape(candidate))
+            if candidate and candidate != "\u76ee\u5f55":
+                return candidate
+        return ""
+
     def _extract_standard_identity(self, code, name):
         resolved_code = clean_text(code)
         resolved_name = clean_text(name)
@@ -281,6 +301,11 @@ class BatchCrawler:
                 resolved_code = extracted_code or self._normalize_standard_code(code_text)
                 if not resolved_name and extracted_name:
                     resolved_name = extracted_name
+
+        if not resolved_name or resolved_name == "\u76ee\u5f55":
+            panel_name = self._extract_name_from_current_standard_panel(resolved_code)
+            if panel_name:
+                resolved_name = panel_name
 
         if not resolved_name:
             resolved_name = self._first_non_empty_text(
@@ -314,6 +339,11 @@ class BatchCrawler:
 
         if resolved_code and resolved_name.startswith(resolved_code):
             resolved_name = clean_text(resolved_name[len(resolved_code):].strip(" :-：|_/"))
+
+        if resolved_name == "\u76ee\u5f55":
+            panel_name = self._extract_name_from_current_standard_panel(resolved_code)
+            if panel_name:
+                resolved_name = panel_name
 
         return clean_text(resolved_code), clean_text(resolved_name)
 
