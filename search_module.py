@@ -5,6 +5,7 @@ from urllib.parse import quote
 
 from selenium.webdriver.common.by import By
 
+from app.scrapling_parser import parse_search_results
 from config import DEFAULT_KEYWORDS
 from utils import build_detail_url, clean_text, init_driver, init_logger, write_excel
 
@@ -141,6 +142,39 @@ class Searcher:
                             page_url = f"{search_url}&pageNo={page_num}"
                             self.driver.get(page_url)
                             time.sleep(1.5)
+
+                        scrapling_used = False
+                        try:
+                            parsed_page = parse_search_results(self.driver.page_source, keyword)
+                            parsed_records = parsed_page.get("records") or []
+                            parsed_count = (
+                                len(parsed_records)
+                                + int(parsed_page.get("skipped_type") or 0)
+                                + int(parsed_page.get("skipped_status") or 0)
+                            )
+                            if parsed_page.get("panel_count") and parsed_count:
+                                skipped_type += int(parsed_page.get("skipped_type") or 0)
+                                skipped_status += int(parsed_page.get("skipped_status") or 0)
+                                for record in parsed_records:
+                                    all_data.append(record)
+                                    keyword_count += 1
+                                    per_keyword_counts[keyword] = keyword_count
+                                    if resolved_limit is not None and keyword_count >= resolved_limit:
+                                        limit_reached = True
+                                        self.logger.info(
+                                            f"  Reached per-keyword limit for {keyword}: {resolved_limit}"
+                                        )
+                                        break
+                                scrapling_used = True
+                        except Exception as exc:
+                            self.logger.warning(f"Scrapling search parsing failed, falling back to Selenium: {exc}")
+
+                        if scrapling_used:
+                            if limit_reached:
+                                break
+                            if page_num % 10 == 0:
+                                self.logger.info(f"  Progress: {page_num}/{total_pages} pages")
+                            continue
 
                         panels = self.driver.find_elements(By.CSS_SELECTOR, "div.panel.panel-default.post")
                         for panel in panels:

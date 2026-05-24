@@ -16,6 +16,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from app.db_utils import validate_table_name
+from app.scrapling_parser import parse_detail_meta
 from config import (
     BASE_PDF_DIR,
     CAPTCHA_CODE_TYPE,
@@ -383,7 +384,17 @@ class BatchCrawler:
             },
         }
 
-    def quick_extract_meta(self, xpaths):
+    def quick_extract_meta(self, xpaths, standard_type=""):
+        try:
+            return parse_detail_meta(
+                self.driver.page_source or "",
+                xpaths,
+                self._safe_current_url(default=""),
+                standard_type,
+            )
+        except Exception as exc:
+            self.logger.warning(f"Scrapling detail parsing failed, falling back to Selenium: {exc}")
+
         results = {}
         for key, xpath in xpaths.items():
             if not xpath:
@@ -1201,7 +1212,8 @@ class BatchCrawler:
                     "english_name": current_xpaths["english_name"],
                     "replace_info": current_xpaths["replace_info"],
                     "reference": current_xpaths["reference"],
-                }
+                },
+                standard_type=standard_type,
             )
             meta["release_date"] = fast_meta["release_date"]
             meta["implement_date"] = fast_meta["implement_date"]
