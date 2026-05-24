@@ -3,8 +3,9 @@ import os
 import re
 import shutil
 import time
+from html import unescape
 from hashlib import md5
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import pandas as pd
 import pymysql
@@ -15,6 +16,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from app.db_utils import validate_table_name
+from app.scrapling_parser import parse_detail_meta
 from config import (
     BASE_PDF_DIR,
     CAPTCHA_CODE_TYPE,
@@ -82,6 +84,7 @@ class BatchCrawler:
         self.failed_items = []
         self.download_summaries = {}
         self.write_results = {}
+        self.processed_results = {}
         self.setup_env()
         self.cjy = Chaojiying_Client(CHAOJIYING_USER, CHAOJIYING_PASS, CHAOJIYING_SOFT_ID)
 
@@ -226,6 +229,11 @@ class BatchCrawler:
         if detail_url:
             self.download_summaries[detail_url] = dict(summary)
 
+    def _has_failed_item(self, detail_url):
+        if not detail_url:
+            return False
+        return any(item.get("detail_url") == detail_url for item in self.failed_items)
+
     def _first_non_empty_text(self, xpath_candidates):
         for xpath in xpath_candidates:
             try:
@@ -257,6 +265,26 @@ class BatchCrawler:
         name = cleaned[match.end():].strip(" :-：|_/")
         return code, clean_text(name)
 
+    def _extract_name_from_current_standard_panel(self, code):
+        if not code:
+            return ""
+
+        try:
+            html = self.driver.page_source or ""
+        except Exception:
+            return ""
+
+        pattern = re.compile(
+            rf"{re.escape(code)}[\s\S]{{0,1200}}?<div[^>]*class=[\"'][^\"']*replA[^\"']*[\"'][^>]*>([\s\S]*?)</div>",
+            re.IGNORECASE,
+        )
+        for match in pattern.finditer(html):
+            candidate = re.sub(r"<[^>]+>", " ", match.group(1))
+            candidate = clean_text(unescape(candidate))
+            if candidate and candidate != "\u76ee\u5f55":
+                return candidate
+        return ""
+
     def _extract_standard_identity(self, code, name):
         resolved_code = clean_text(code)
         resolved_name = clean_text(name)
@@ -274,6 +302,11 @@ class BatchCrawler:
                 resolved_code = extracted_code or self._normalize_standard_code(code_text)
                 if not resolved_name and extracted_name:
                     resolved_name = extracted_name
+
+        if not resolved_name or resolved_name == "\u76ee\u5f55":
+            panel_name = self._extract_name_from_current_standard_panel(resolved_code)
+            if panel_name:
+                resolved_name = panel_name
 
         if not resolved_name:
             resolved_name = self._first_non_empty_text(
@@ -307,6 +340,11 @@ class BatchCrawler:
 
         if resolved_code and resolved_name.startswith(resolved_code):
             resolved_name = clean_text(resolved_name[len(resolved_code):].strip(" :-：|_/"))
+
+        if resolved_name == "\u76ee\u5f55":
+            panel_name = self._extract_name_from_current_standard_panel(resolved_code)
+            if panel_name:
+                resolved_name = panel_name
 
         return clean_text(resolved_code), clean_text(resolved_name)
 
@@ -346,7 +384,17 @@ class BatchCrawler:
             },
         }
 
-    def quick_extract_meta(self, xpaths):
+    def quick_extract_meta(self, xpaths, standard_type=""):
+        try:
+            return parse_detail_meta(
+                self.driver.page_source or "",
+                xpaths,
+                self._safe_current_url(default=""),
+                standard_type,
+            )
+        except Exception as exc:
+            self.logger.warning(f"Scrapling detail parsing failed, falling back to Selenium: {exc}")
+
         results = {}
         for key, xpath in xpaths.items():
             if not xpath:
@@ -851,6 +899,9 @@ class BatchCrawler:
         return sorted(unique.values(), key=lambda item: item.get("score", 0), reverse=True)
 
     def _extract_interstitial_download_candidate(self):
+        if self._read_browser_error_page() is not None:
+            return None
+
         try:
             reload_button = self.driver.find_element(By.ID, "reload-button")
         except Exception:
@@ -870,6 +921,49 @@ class BatchCrawler:
             "content_type": None,
             "score": 200,
         }
+
+    def _read_browser_error_page(self):
+        try:
+            page_source = self.driver.page_source or ""
+        except Exception:
+            return None
+
+        if 'id="main-frame-error"' not in page_source:
+            return None
+
+        error_code_match = re.search(r'"errorCode":"([^"]+)"', page_source)
+        reload_url_match = re.search(r'"reloadUrl":"([^"]+)"', page_source)
+
+        title = ""
+        try:
+            title = (self.driver.title or "").strip()
+        except Exception:
+            pass
+
+        return {
+            "title": title,
+            "current_url": self._safe_current_url(""),
+            "error_code": error_code_match.group(1) if error_code_match else "",
+            "reload_url": unescape(reload_url_match.group(1)) if reload_url_match else "",
+        }
+
+    def _raise_browser_error_page(self, summary):
+        browser_error = self._read_browser_error_page()
+        if browser_error is None:
+            return
+
+        request_url = browser_error.get("reload_url") or browser_error.get("current_url") or ""
+        parsed = urlparse(request_url)
+        endpoint = parsed.netloc or browser_error.get("title") or "download endpoint"
+        error_code = browser_error.get("error_code") or "BROWSER_NET_ERROR"
+
+        if request_url:
+            summary["request_url"] = request_url
+            summary["request_method"] = "GET"
+            summary["download_url_resolved"] = True
+        summary["transport"] = "browser_error_page"
+        summary["error_stage"] = "upstream_unavailable"
+        raise RuntimeError(f"national standard download endpoint unavailable: {endpoint} returned {error_code}")
 
     def _standard_unpublic_reason(self, standard_type, current_xpaths):
         if standard_type == "国标":
@@ -913,6 +1007,9 @@ class BatchCrawler:
         if not view_text_xpath:
             meta["ps"] = "missing view_text button xpath"
             return False
+
+        if current_xpaths.get("download_standard_btn"):
+            view_text_xpath = "//*[contains(concat(' ', normalize-space(@class), ' '), ' openpdf ')]"
 
         view_buttons = self.driver.find_elements(By.XPATH, view_text_xpath)
         if not view_buttons:
@@ -964,7 +1061,19 @@ class BatchCrawler:
             )
             dst_pdf = self.get_pdf_save_path(meta, meta.get("code"), meta.get("name"))
             referer = row.get("detail_url") or self._safe_current_url("")
-            return self._download_via_session(interstitial_candidate, dst_pdf, referer, summary)
+            try:
+                return self._download_via_session(interstitial_candidate, dst_pdf, referer, summary)
+            except Exception as exc:
+                summary["error_stage"] = "direct_download"
+                summary["transport"] = "browser_download_fallback"
+                summary["pdf_saved"] = False
+                self.logger.warning(f"direct download failed, fallback to browser temp download: {exc}")
+                fallback_pdf = self._move_downloaded_pdf_from_temp(dst_pdf, summary)
+                if fallback_pdf:
+                    return fallback_pdf
+                raise
+
+        self._raise_browser_error_page(summary)
 
         captcha_img_xpath = current_xpaths.get("captcha_img")
         captcha_input_xpath = current_xpaths.get("captcha_input")
@@ -1051,7 +1160,6 @@ class BatchCrawler:
         meta["type"] = standard_type
         meta["ps"] = "metadata extracted"
         final_pdf = ""
-        should_save = False
         download_summary = self._new_download_summary(row, standard_type)
 
         try:
@@ -1092,8 +1200,6 @@ class BatchCrawler:
                 self._add_failed_item(meta, meta["ps"])
                 return
 
-            should_save = True
-
             fast_meta = self.quick_extract_meta(
                 {
                     "release_date": current_xpaths["release_date"],
@@ -1106,7 +1212,8 @@ class BatchCrawler:
                     "english_name": current_xpaths["english_name"],
                     "replace_info": current_xpaths["replace_info"],
                     "reference": current_xpaths["reference"],
-                }
+                },
+                standard_type=standard_type,
             )
             meta["release_date"] = fast_meta["release_date"]
             meta["implement_date"] = fast_meta["implement_date"]
@@ -1142,8 +1249,20 @@ class BatchCrawler:
             download_summary["debug_files"] = [path for path in download_summary["debug_files"] if path]
             meta["download_summary"] = download_summary
             self._record_download_summary(detail_url, download_summary)
+            if detail_url:
+                meta_snapshot = dict(meta)
+                self.processed_results[detail_url] = {
+                    "meta": meta_snapshot,
+                    "pdf_path": final_pdf or "",
+                }
             self.safe_close_window(main_handle)
-            if should_save and meta.get("code"):
+            should_save = (
+                bool(meta.get("code"))
+                and bool(final_pdf)
+                and bool(download_summary.get("pdf_saved"))
+                and not self._has_failed_item(detail_url)
+            )
+            if should_save:
                 self.save_db(meta, final_pdf)
 
     def run(self, excel_file=None, generate_failed_output=False, failed_keywords=None):

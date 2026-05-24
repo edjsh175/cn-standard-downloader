@@ -8,10 +8,32 @@ import pymysql
 import config
 from app.db_utils import build_business_table_sql, validate_table_name
 
+DEFAULT_BUSINESS_TABLE_NAME = "gb_standards"
+BUSINESS_REQUIRED_COLUMNS = {
+    "id",
+    "standard_code",
+    "keyword",
+    "draft_unit",
+    "drafter",
+    "chinese_name",
+    "english_name",
+    "release_date",
+    "implement_date",
+    "release_unit",
+    "charge_unit",
+    "replace_standard",
+    "standard_status",
+    "application_scope",
+    "reference_standard",
+    "pdf_path",
+    "ps",
+}
+
 
 class TaskStore:
     def __init__(self):
         self.ensure_task_tables()
+        self.ensure_business_table(DEFAULT_BUSINESS_TABLE_NAME)
 
     def _connect(self):
         return pymysql.connect(**config.DB_CONFIG, charset="utf8mb4", autocommit=True)
@@ -66,14 +88,39 @@ class TaskStore:
             cursor.execute(tasks_sql)
             cursor.execute(items_sql)
 
+    @staticmethod
+    def _table_columns(cursor, table_name: str) -> set[str]:
+        cursor.execute(f"SHOW COLUMNS FROM `{table_name}`")
+        return {row[0] for row in cursor.fetchall()}
+
+    @staticmethod
+    def _is_business_table(cursor, table_name: str) -> bool:
+        try:
+            columns = TaskStore._table_columns(cursor, table_name)
+        except pymysql.MySQLError:
+            return False
+        return BUSINESS_REQUIRED_COLUMNS.issubset(columns)
+
     def ensure_business_table(self, table_name: str):
         sql = build_business_table_sql(table_name)
         with closing(self._connect()) as conn, closing(conn.cursor()) as cursor:
             cursor.execute(sql)
+            if not self._is_business_table(cursor, table_name):
+                raise ValueError(
+                    f"table_name '{table_name}' is not a compatible crawler business table; "
+                    f"use '{DEFAULT_BUSINESS_TABLE_NAME}' or another table created by the crawler"
+                )
 
     def create_task(self, task_type: str, payload: dict[str, Any]) -> str:
-        table_name = validate_table_name(payload["table_name"])
-        self.ensure_business_table(table_name)
+        raw_table_name = str(payload.get("table_name") or "").strip()
+        table_name = ""
+        if task_type == "search_only":
+            if raw_table_name:
+                table_name = validate_table_name(raw_table_name)
+        else:
+            table_name = validate_table_name(raw_table_name or DEFAULT_BUSINESS_TABLE_NAME)
+            payload["table_name"] = table_name
+            self.ensure_business_table(table_name)
         task_id = str(uuid.uuid4())
         sql = """
         INSERT INTO crawl_tasks (id, task_type, status, table_name, request_payload)
@@ -88,6 +135,14 @@ class TaskStore:
         with closing(self._connect()) as conn, closing(conn.cursor()) as cursor:
             cursor.execute(sql, params)
         return task_id
+
+    def list_tables(self):
+        sql = "SHOW TABLES"
+        with closing(self._connect()) as conn, closing(conn.cursor()) as cursor:
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            tables = [row[0] for row in rows]
+            return [table for table in tables if self._is_business_table(cursor, table)]
 
     def mark_running(self, task_id: str):
         sql = """
@@ -213,19 +268,41 @@ class TaskStore:
         pdf_path: str | None = None,
         error_message: str | None = None,
         meta_payload: dict[str, Any] | None = None,
+        code: str | None = None,
+        name: str | None = None,
+        keyword: str | None = None,
     ):
         sql = """
         UPDATE crawl_task_items
-        SET item_status=%s, pdf_path=%s, error_message=%s, meta_payload=%s
+        SET item_status=%s,
+            pdf_path=%s,
+            error_message=%s,
+            meta_payload=%s,
+            code=COALESCE(%s, code),
+            name=COALESCE(%s, name),
+            keyword=COALESCE(%s, keyword)
         WHERE task_id=%s AND detail_url=%s
         """
         payload = self._dumps(meta_payload) if meta_payload is not None else None
         with closing(self._connect()) as conn, closing(conn.cursor()) as cursor:
-            cursor.execute(sql, (item_status, pdf_path, error_message, payload, task_id, detail_url))
+            cursor.execute(
+                sql,
+                (
+                    item_status,
+                    pdf_path,
+                    error_message,
+                    payload,
+                    code,
+                    name,
+                    keyword,
+                    task_id,
+                    detail_url,
+                ),
+            )
 
     def list_task_items(self, task_id: str):
         sql = """
-        SELECT detail_url, code, name, keyword, item_status, pdf_path, error_message, meta_payload
+        SELECT id, detail_url, code, name, keyword, item_status, pdf_path, error_message, meta_payload
         FROM crawl_task_items
         WHERE task_id=%s
         ORDER BY id ASC
@@ -236,3 +313,18 @@ class TaskStore:
         for row in rows:
             row["meta_payload"] = self._loads(row["meta_payload"])
         return rows
+
+    def get_task_item(self, task_id: str, item_id: int):
+        sql = """
+        SELECT id, detail_url, code, name, keyword, item_status, pdf_path, error_message, meta_payload
+        FROM crawl_task_items
+        WHERE task_id=%s AND id=%s
+        LIMIT 1
+        """
+        with closing(self._connect()) as conn, closing(conn.cursor(pymysql.cursors.DictCursor)) as cursor:
+            cursor.execute(sql, (task_id, item_id))
+            row = cursor.fetchone()
+        if not row:
+            return None
+        row["meta_payload"] = self._loads(row["meta_payload"])
+        return row

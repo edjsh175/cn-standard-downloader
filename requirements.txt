@@ -6,3 +6,4 @@ ttkbootstrap==1.20.1
 webdriver_manager==4.0.2
 openpyxl==3.1.5
 cryptography==45.0.7
+scrapling==0.4.8

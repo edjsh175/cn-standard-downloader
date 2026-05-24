@@ -27,11 +27,12 @@ class PipelineRunner:
 
     def _build_overrides(self, payload: dict[str, Any], artifact_root: str) -> dict[str, Any]:
         runtime_root = os.path.join(config.get_base_dir(), ".tmp", "worker_runtime", os.path.basename(artifact_root))
+        headless_value = payload.get("headless")
         return {
             "pdf_dir": payload.get("pdf_dir") or os.path.join(artifact_root, "pdf"),
             "temp_dir": os.path.join(runtime_root, "temp"),
             "debug_dir": os.path.join(artifact_root, "debug"),
-            "headless_browser": bool(payload.get("headless", False)),
+            "headless_browser": config.HEADLESS_BROWSER if headless_value is None else bool(headless_value),
         }
 
     def _check_cancelled(self, task_id: str):
@@ -74,7 +75,22 @@ class PipelineRunner:
             )
         return normalized
 
-    def _finalize_task_items(self, task_id, items, saved_results, failed_items):
+    @staticmethod
+    def _resolved_item_fields(item: dict[str, Any], meta: dict[str, Any] | None):
+        source = meta if isinstance(meta, dict) else {}
+
+        def resolved(key: str):
+            value = source.get(key) or item.get(key)
+            text = str(value or "").strip()
+            return text or None
+
+        return {
+            "code": resolved("code"),
+            "name": resolved("name"),
+            "keyword": resolved("keyword"),
+        }
+
+    def _finalize_task_items(self, task_id, items, saved_results, processed_results, failed_items):
         unique_failures = {}
         for item in failed_items:
             unique_failures[item["detail_url"]] = item
@@ -86,11 +102,14 @@ class PipelineRunner:
 
         for item in items:
             detail_url = item["detail_url"]
-            saved = saved_results.get(detail_url) or {}
+            saved = saved_results.get(detail_url) or processed_results.get(detail_url) or {}
             meta = saved.get("meta") or item
             pdf_path = saved.get("pdf_path")
             write_result = saved.get("write_result") or {}
             failure = unique_failures.get(detail_url)
+            download_summary = (meta.get("download_summary") or {}) if isinstance(meta, dict) else {}
+            pdf_saved = bool(pdf_path) and bool(download_summary.get("pdf_saved"))
+            resolved_fields = self._resolved_item_fields(item, meta)
 
             if failure:
                 failure_count += 1
@@ -98,7 +117,7 @@ class PipelineRunner:
                 errors.append(
                     {
                         "detail_url": detail_url,
-                        "code": item.get("code"),
+                        "code": resolved_fields["code"],
                         "error_type": failure.get("error_type"),
                         "message": failure.get("fail_reason"),
                     }
@@ -110,8 +129,9 @@ class PipelineRunner:
                     pdf_path=pdf_path,
                     error_message=failure.get("fail_reason"),
                     meta_payload=meta,
+                    **resolved_fields,
                 )
-            elif detail_url in saved_results:
+            elif detail_url in saved_results and pdf_saved:
                 success_count += 1
                 item_status = str(write_result.get("status") or "succeeded")
                 if item_status in write_counts:
@@ -122,15 +142,16 @@ class PipelineRunner:
                     item_status=item_status,
                     pdf_path=pdf_path,
                     meta_payload=meta,
+                    **resolved_fields,
                 )
             else:
                 failure_count += 1
                 write_counts["failed"] += 1
-                message = "No database write record captured for this item"
+                message = "No successful PDF download or database write record captured for this item"
                 errors.append(
                     {
                         "detail_url": detail_url,
-                        "code": item.get("code"),
+                        "code": resolved_fields["code"],
                         "error_type": "unknown",
                         "message": message,
                     }
@@ -141,6 +162,7 @@ class PipelineRunner:
                     item_status="failed",
                     error_message=message,
                     meta_payload=meta,
+                    **resolved_fields,
                 )
 
         return success_count, failure_count, write_counts, errors
@@ -210,7 +232,7 @@ class PipelineRunner:
         search_result = None
 
         self._check_cancelled(task_id)
-        if task_type == "keyword_search":
+        if task_type in {"keyword_search", "search_only"}:
             search_result = search_standards_with_output(
                 keywords,
                 output_filename=search_output,
@@ -228,9 +250,53 @@ class PipelineRunner:
         else:
             raise ValueError(f"Unsupported task type: {task_type}")
 
-        self.task_store.upsert_task_items(task_id, items, item_status="pending")
+        initial_item_status = "preview" if task_type == "search_only" else "pending"
+        self.task_store.upsert_task_items(task_id, items, item_status=initial_item_status)
 
         search_summary = self._normalize_search_summary(search_result, items)
+
+        if task_type == "search_only":
+            return {
+                "task_id": task_id,
+                "status": "succeeded",
+                "summary": {
+                    "total": len(items),
+                    "succeeded": len(items),
+                    "failed": 0,
+                    "skipped": 0,
+                },
+                "inserted": 0,
+                "updated": 0,
+                "skipped": 0,
+                "search_summary": search_summary,
+                "artifacts": {
+                    "search_results": search_output if os.path.exists(search_output) else None,
+                    "failed_results": None,
+                    "log_file": task_log,
+                    "pdf_dir": overrides["pdf_dir"],
+                    "debug_dir": overrides["debug_dir"],
+                },
+                "db_write_summary": {
+                    "table_name": payload.get("table_name") or "",
+                    "duplicate_policy": payload.get("duplicate_policy", "overwrite"),
+                    "task_items": len(items),
+                    "saved_items": 0,
+                    "inserted": 0,
+                    "updated": 0,
+                    "skipped": 0,
+                    "failed": 0,
+                },
+                "download_summary": {
+                    "total_items": 0,
+                    "tracked_items": 0,
+                    "direct_download_used": 0,
+                    "download_url_resolved": 0,
+                    "session_extracted": 0,
+                    "pdf_saved": 0,
+                },
+                "errors": [],
+                "postprocess_status": "not_started",
+            }
 
         if not items:
             return {
@@ -249,7 +315,7 @@ class PipelineRunner:
                     "debug_dir": overrides["debug_dir"],
                 },
                 "db_write_summary": {
-                    "table_name": payload["table_name"],
+                    "table_name": payload.get("table_name") or "",
                     "duplicate_policy": payload.get("duplicate_policy", "overwrite"),
                     "task_items": 0,
                     "saved_items": 0,
@@ -307,13 +373,14 @@ class PipelineRunner:
             if crawler.failed_items:
                 with working_directory(artifact_root):
                     failed_artifact_name = crawler.generate_failed_excel(keywords=keywords or None)
-            self._finalize_task_items(task_id, items, saved_results, crawler.failed_items)
+            self._finalize_task_items(task_id, items, saved_results, crawler.processed_results, crawler.failed_items)
             raise
 
         success_count, failure_count, write_counts, errors = self._finalize_task_items(
             task_id,
             items,
             saved_results,
+            crawler.processed_results,
             crawler.failed_items,
         )
         download_summary = (crawl_result or {}).get("download_summary") or self._summarize_downloads(
@@ -347,7 +414,7 @@ class PipelineRunner:
                 "debug_dir": overrides["debug_dir"],
             },
             "db_write_summary": {
-                "table_name": payload["table_name"],
+                "table_name": payload.get("table_name") or "",
                 "duplicate_policy": payload.get("duplicate_policy", "overwrite"),
                 "task_items": len(items),
                 "saved_items": write_counts["inserted"] + write_counts["updated"],

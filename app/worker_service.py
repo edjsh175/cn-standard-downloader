@@ -1,14 +1,17 @@
 import json
+import mimetypes
+import os
 import queue
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import quote, urlparse
 
 import config
 
 from app.db_utils import validate_table_name
 from app.pipeline import PipelineRunner
-from app.task_store import TaskStore
+from app.task_store import DEFAULT_BUSINESS_TABLE_NAME, TaskStore
 from utils import extract_detail_urls_from_text, normalize_detail_url
 
 
@@ -66,14 +69,19 @@ class TaskWorkerService:
 
     def submit_task(self, payload: dict):
         task_type = payload.get("task_type")
-        if task_type not in {"keyword_search", "direct_grab"}:
-            raise ValueError("task_type must be keyword_search or direct_grab")
+        if task_type not in {"keyword_search", "direct_grab", "search_only"}:
+            raise ValueError("task_type must be keyword_search, direct_grab, or search_only")
 
-        table_name = validate_table_name(payload.get("table_name"))
-        payload["table_name"] = table_name
-        payload["duplicate_policy"] = self._normalize_duplicate_policy(payload.get("duplicate_policy"))
+        if task_type in {"keyword_search", "direct_grab"}:
+            raw_table_name = str(payload.get("table_name") or "").strip()
+            table_name = validate_table_name(raw_table_name or DEFAULT_BUSINESS_TABLE_NAME)
+            payload["table_name"] = table_name
+            payload["duplicate_policy"] = self._normalize_duplicate_policy(payload.get("duplicate_policy"))
+        else:
+            raw_table_name = str(payload.get("table_name") or "").strip()
+            payload["table_name"] = validate_table_name(raw_table_name) if raw_table_name else ""
 
-        if task_type == "keyword_search":
+        if task_type in {"keyword_search", "search_only"}:
             keywords = payload.get("keywords")
             if not isinstance(keywords, list) or not [kw for kw in keywords if str(kw).strip()]:
                 raise ValueError("keywords must be a non-empty list")
@@ -108,18 +116,134 @@ class TaskWorkerService:
         self.task_queue.put(task_id)
         return self.task_store.get_task(task_id)
 
+    def list_tables(self):
+        return self.task_store.list_tables()
+
+    @staticmethod
+    def _task_artifact_root(task_id: str) -> str:
+        return os.path.join(config.get_base_dir(), "artifacts", "tasks", task_id)
+
+    @staticmethod
+    def _artifact_url(task_id: str, artifact_name: str) -> str:
+        return f"api/tasks/{task_id}/artifacts/{artifact_name}"
+
+    @staticmethod
+    def _pdf_url(task_id: str, item_id: int) -> str:
+        return f"api/tasks/{task_id}/items/{item_id}/pdf"
+
+    def _artifact_path(self, task_id: str, artifact_name: str) -> str | None:
+        task = self.task_store.get_task(task_id)
+        if not task:
+            return None
+
+        artifact_root = self._task_artifact_root(task_id)
+        if artifact_name == "search_results":
+            path = os.path.join(artifact_root, "search_results.xlsx")
+            return path if os.path.exists(path) else None
+        if artifact_name == "log_file":
+            path = os.path.join(artifact_root, "task.log")
+            return path if os.path.exists(path) else None
+        if artifact_name == "failed_results":
+            result_payload = task.get("result_payload") or {}
+            artifacts = result_payload.get("artifacts") or {}
+            path = artifacts.get("failed_results")
+            if not path:
+                return None
+            resolved = os.path.abspath(path)
+            if not os.path.exists(resolved):
+                return None
+            return resolved
+        return None
+
+    def get_artifact_file(self, task_id: str, artifact_name: str):
+        path = self._artifact_path(task_id, artifact_name)
+        if not path:
+            return None
+        return {"path": path, "download_name": os.path.basename(path)}
+
+    def get_task_item_pdf(self, task_id: str, item_id: int):
+        item = self.task_store.get_task_item(task_id, item_id)
+        if not item:
+            return None
+        pdf_path = item.get("pdf_path")
+        if not pdf_path:
+            return None
+        resolved = os.path.abspath(str(pdf_path))
+        task_root = os.path.abspath(self._task_artifact_root(task_id))
+        try:
+            common_root = os.path.commonpath([resolved, task_root])
+        except ValueError:
+            return None
+        if common_root != task_root or not os.path.exists(resolved):
+            return None
+        return {"path": resolved, "download_name": os.path.basename(resolved)}
+
+    def _attach_result_urls(self, task_id: str, result_payload: dict | None):
+        if result_payload is None:
+            return None
+        payload = dict(result_payload)
+        artifacts = dict(payload.get("artifacts") or {})
+        artifact_urls = {}
+        for artifact_name in ("search_results", "failed_results", "log_file"):
+            if artifacts.get(artifact_name):
+                artifact_urls[artifact_name] = self._artifact_url(task_id, artifact_name)
+        if artifact_urls:
+            payload["artifact_urls"] = artifact_urls
+        return payload
+
+    def _attach_item_urls(self, task_id: str, items: list[dict]):
+        normalized = []
+        for item in items:
+            row = dict(item)
+            meta = row.get("meta_payload")
+            if isinstance(meta, dict):
+                for key in ("code", "name", "keyword"):
+                    value = str(meta.get(key) or "").strip()
+                    if value and not row.get(key):
+                        row[key] = value
+            if row.get("pdf_path"):
+                row["pdf_download_url"] = self._pdf_url(task_id, int(row["id"]))
+            normalized.append(row)
+        return normalized
+
+    @staticmethod
+    def _attach_error_display_fields(result_payload: dict | None, items: list[dict]):
+        if result_payload is None:
+            return None
+        payload = dict(result_payload)
+        item_by_url = {item.get("detail_url"): item for item in items}
+        errors = []
+        for error in payload.get("errors") or []:
+            row = dict(error)
+            item = item_by_url.get(row.get("detail_url")) or {}
+            for key in ("code", "name"):
+                if not row.get(key) and item.get(key):
+                    row[key] = item[key]
+            errors.append(row)
+        if errors:
+            payload["errors"] = errors
+        return payload
+
     def get_task(self, task_id: str):
-        return self.task_store.get_task(task_id)
+        task = self.task_store.get_task(task_id)
+        if not task:
+            return None
+        task = dict(task)
+        task["result_payload"] = self._attach_result_urls(task_id, task.get("result_payload"))
+        return task
 
     def get_task_result(self, task_id: str):
         task = self.task_store.get_task(task_id)
         if not task:
             return None
+        items = self._attach_item_urls(task_id, self.task_store.list_task_items(task_id))
+        result = self._attach_result_urls(task_id, task.get("result_payload"))
+        result = self._attach_error_display_fields(result, items)
         return {
             "task_id": task["id"],
             "status": task["status"],
-            "result": task["result_payload"],
-            "items": self.task_store.list_task_items(task_id),
+            "result": result,
+            "items": items,
             "error_message": task["error_message"],
         }
 
@@ -197,12 +321,77 @@ class WorkerRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    def _write_file(self, status: int, path: str, download_name: str, as_attachment: bool = True):
+        with open(path, "rb") as file_obj:
+            data = file_obj.read()
+        content_type = mimetypes.guess_type(download_name)[0] or "application/octet-stream"
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        if as_attachment:
+            fallback_name = download_name.encode("ascii", "ignore").decode("ascii").replace('"', "_") or "download"
+            encoded_name = quote(download_name, safe="")
+            disposition = f"attachment; filename=\"{fallback_name}\"; filename*=UTF-8''{encoded_name}"
+            self.send_header("Content-Disposition", disposition)
+        self.end_headers()
+        self.wfile.write(data)
+
+    @staticmethod
+    def _normalize_path(path: str):
+        return [part for part in path.split("/") if part]
+
+    @staticmethod
+    def _static_root():
+        return os.path.join(config.get_base_dir(), "web", "dist")
+
+    def _serve_static(self, raw_path: str):
+        static_root = os.path.abspath(self._static_root())
+        if not os.path.isdir(static_root):
+            self._write_json(HTTPStatus.NOT_FOUND, {"error": "web app not built"})
+            return
+
+        request_path = raw_path.lstrip("/") or "index.html"
+        resolved = os.path.abspath(os.path.join(static_root, request_path))
+        try:
+            common_root = os.path.commonpath([resolved, static_root])
+        except ValueError:
+            self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+            return
+
+        if common_root != static_root:
+            self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+            return
+
+        if os.path.isfile(resolved):
+            self._write_file(HTTPStatus.OK, resolved, os.path.basename(resolved), as_attachment=False)
+            return
+
+        index_path = os.path.join(static_root, "index.html")
+        if os.path.isfile(index_path):
+            self._write_file(HTTPStatus.OK, index_path, "index.html", as_attachment=False)
+            return
+
+        self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+
     def do_GET(self):
-        if self.path == "/health":
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path in {"/health", "/api/health"}:
             self._write_json(HTTPStatus.OK, {"status": "ok"})
             return
 
-        parts = [part for part in self.path.split("/") if part]
+        if path == "/api/tables":
+            try:
+                tables = self.service.list_tables()  # type: ignore[union-attr]
+                self._write_json(HTTPStatus.OK, {"tables": tables})
+            except Exception as exc:
+                self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            return
+
+        parts = self._normalize_path(path)
+        if parts[:1] == ["api"]:
+            parts = parts[1:]
+
         if len(parts) == 2 and parts[0] == "tasks":
             task = self.service.get_task(parts[1])  # type: ignore[union-attr]
             if not task:
@@ -219,10 +408,37 @@ class WorkerRequestHandler(BaseHTTPRequestHandler):
             self._write_json(HTTPStatus.OK, result)
             return
 
-        self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+        if len(parts) == 4 and parts[0] == "tasks" and parts[2] == "artifacts":
+            artifact = self.service.get_artifact_file(parts[1], parts[3])  # type: ignore[union-attr]
+            if not artifact:
+                self._write_json(HTTPStatus.NOT_FOUND, {"error": "artifact not found"})
+                return
+            self._write_file(HTTPStatus.OK, artifact["path"], artifact["download_name"])
+            return
+
+        if len(parts) == 5 and parts[0] == "tasks" and parts[2] == "items" and parts[4] == "pdf":
+            try:
+                item_id = int(parts[3])
+            except ValueError:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"error": "invalid item id"})
+                return
+            artifact = self.service.get_task_item_pdf(parts[1], item_id)  # type: ignore[union-attr]
+            if not artifact:
+                self._write_json(HTTPStatus.NOT_FOUND, {"error": "pdf not found"})
+                return
+            self._write_file(HTTPStatus.OK, artifact["path"], artifact["download_name"])
+            return
+
+        if path.startswith("/api/"):
+            self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+            return
+
+        self._serve_static(path)
 
     def do_POST(self):
-        if self.path == "/tasks":
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path in {"/tasks", "/api/tasks"}:
             try:
                 payload = self._read_json()
                 task = self.service.submit_task(payload)  # type: ignore[union-attr]
@@ -233,7 +449,9 @@ class WorkerRequestHandler(BaseHTTPRequestHandler):
                 self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
             return
 
-        parts = [part for part in self.path.split("/") if part]
+        parts = self._normalize_path(path)
+        if parts[:1] == ["api"]:
+            parts = parts[1:]
         if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel":
             task = self.service.cancel_task(parts[1])  # type: ignore[union-attr]
             if not task:

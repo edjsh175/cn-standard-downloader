@@ -28,6 +28,8 @@ captcha_step2.png
 # Local tooling
 .idea/
 .vscode/
+web/node_modules/
+web/dist/
 
 # OS junk
 Thumbs.db
