@@ -147,6 +147,18 @@ select {
   align-items: center;
 }
 
+.auth-bar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 18px;
+}
+
+.token-field input {
+  min-height: 48px;
+}
+
 .task-chip {
   display: inline-flex;
   align-items: center;
@@ -500,11 +512,22 @@ select {
 .download-link {
   display: inline-flex;
   align-items: center;
+  border: 0;
   padding: 10px 14px;
   border-radius: 999px;
   background: var(--brand-soft);
   color: var(--brand);
+  cursor: pointer;
   text-decoration: none;
+}
+
+.text-link {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: underline;
 }
 
 .error-list {
@@ -555,6 +578,7 @@ th {
   .tabs,
   .summary-grid,
   .global-grid,
+  .auth-bar,
   .form-grid {
     grid-template-columns: 1fr;
   }

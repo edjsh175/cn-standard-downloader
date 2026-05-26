@@ -101,6 +101,7 @@ cp .env.test.example .env.test
 - `STD_CHAOJIYING_SOFTID`
 - `STD_BIND_IP`
 - `STD_WORKER_PORT`
+- `STD_WORKER_API_TOKEN`
 - `STD_ARTIFACTS_DIR`
 - `STD_TMP_DIR`
 - `STD_WEB_BASE_PATH`
@@ -130,6 +131,7 @@ Notes:
 - The test instance is intentionally bound to `127.0.0.1` so it is only reachable from the server itself.
 - The image is built locally from this repository. You do not need to manually clone any application image from a registry.
 - Docker will still pull base images required by the `Dockerfile` during the build if they do not already exist on the machine.
+- The web console does not receive `STD_WORKER_API_TOKEN` during image build. Enter the worker token in the browser at runtime; it is stored only for the current browser session.
 
 ## Start Production
 
@@ -208,7 +210,9 @@ This does not affect the production environment.
 Submit a single `direct_grab` task to the target instance:
 
 ```bash
+TOKEN="<worker-token>"
 curl -X POST http://127.0.0.1:<worker-port>/tasks \
+  -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
     "task_type": "direct_grab",
@@ -228,14 +232,15 @@ curl -X POST http://127.0.0.1:<worker-port>/tasks \
 Check task state:
 
 ```bash
-curl http://127.0.0.1:<worker-port>/tasks/<task_id>
-curl http://127.0.0.1:<worker-port>/tasks/<task_id>/result
+curl -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:<worker-port>/tasks/<task_id>
+curl -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:<worker-port>/tasks/<task_id>/result
 ```
 
 Minimal search preview smoke task:
 
 ```bash
 curl -X POST http://127.0.0.1:<worker-port>/api/tasks \
+  -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
     "task_type": "search_only",
@@ -247,7 +252,7 @@ curl -X POST http://127.0.0.1:<worker-port>/api/tasks \
 Browser smoke check:
 
 1. Open `http://127.0.0.1:<worker-port>/`
-2. Confirm the page loads
+2. Enter the current `STD_WORKER_API_TOKEN`
 3. Confirm the table list can be fetched
 4. Submit a `search_only` task from the page
 

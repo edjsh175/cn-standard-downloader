@@ -1,4 +1,5 @@
 import json
+import hmac
 import mimetypes
 import os
 import queue
@@ -341,6 +342,32 @@ class WorkerRequestHandler(BaseHTTPRequestHandler):
         return [part for part in path.split("/") if part]
 
     @staticmethod
+    def _requires_auth(path: str) -> bool:
+        if path in {"/health", "/api/health"}:
+            return False
+        parts = WorkerRequestHandler._normalize_path(path)
+        return bool(parts and parts[0] in {"api", "tasks"})
+
+    def _has_valid_bearer_token(self) -> bool:
+        expected_token = str(getattr(config, "WORKER_API_TOKEN", "") or "").strip()
+        if not expected_token:
+            return False
+
+        authorization = str(self.headers.get("Authorization") or "").strip()
+        scheme, separator, token = authorization.partition(" ")
+        if separator != " " or scheme.lower() != "bearer":
+            return False
+        return hmac.compare_digest(token.strip(), expected_token)
+
+    def _authorize_request(self, path: str) -> bool:
+        if not self._requires_auth(path):
+            return True
+        if self._has_valid_bearer_token():
+            return True
+        self._write_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+        return False
+
+    @staticmethod
     def _static_root():
         return os.path.join(config.get_base_dir(), "web", "dist")
 
@@ -376,6 +403,9 @@ class WorkerRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if not self._authorize_request(path):
+            return
+
         if path in {"/health", "/api/health"}:
             self._write_json(HTTPStatus.OK, {"status": "ok"})
             return
@@ -438,6 +468,9 @@ class WorkerRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if not self._authorize_request(path):
+            return
+
         if path in {"/tasks", "/api/tasks"}:
             try:
                 payload = self._read_json()

@@ -24,6 +24,7 @@ services:
       STD_HEADLESS_BROWSER: ${STD_HEADLESS_BROWSER:-true}
       STD_WORKER_HOST: 0.0.0.0
       STD_WORKER_PORT: 8765
+      STD_WORKER_API_TOKEN: ${STD_WORKER_API_TOKEN:-}
       STD_CHROMEDRIVER_PATH: /usr/bin/chromedriver
       STD_CHROME_BINARY: /usr/bin/chromium
     volumes:

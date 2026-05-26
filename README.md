@@ -2,26 +2,46 @@
 
 国标爬虫正在从“本地人工下载器”演进为“可被 AI 调用的执行引擎”。
 
-当前主入口是 HTTP worker 服务，适合被 agent、自动化流程或其他系统调用。历史上的本地 GUI 仍然保留，用于人工调试和兼容旧使用方式。网页手动操作入口是后续方向，本仓库当前不宣称已实现。
+当前主入口是 HTTP worker 服务 + Web console。worker 适合被 agent、自动化流程或其他系统调用；Web console 复用同一个 worker API，提供浏览器内的人工操作入口。历史上的本地 GUI 仍然保留，但定位为兼容和调试入口。
 
 ## 当前定位
 
-- 主入口：`run_worker.py` / `app.worker_service`
-- 兼容入口：`gui_main.py`
-- 后续方向：网页手动操作入口
+- 主入口：`run_worker.py` / `app.worker_service`，以及由 worker 托管的 `web/dist` Web console
+- 兼容调试入口：`gui_main.py`
+- 前端源码：`web/`
 
 ## Worker API
 
 - `GET /health`
+- `GET /api/health`
 - `POST /tasks`
 - `GET /tasks/{task_id}`
 - `GET /tasks/{task_id}/result`
 - `POST /tasks/{task_id}/cancel`
+- `GET /api/tasks/{task_id}/artifacts/{artifact_name}`
+- `GET /api/tasks/{task_id}/items/{item_id}/pdf`
+
+除 `GET /health`、`GET /api/health` 和静态 Web console 页面外，worker API 需要 Bearer token：
+
+```bash
+export STD_WORKER_API_TOKEN="change-me-worker-token"
+curl -H "Authorization: Bearer change-me-worker-token" http://127.0.0.1:8765/api/tables
+```
+
+PowerShell:
+
+```powershell
+$env:STD_WORKER_API_TOKEN = "change-me-worker-token"
+curl.exe -H "Authorization: Bearer change-me-worker-token" http://127.0.0.1:8765/api/tables
+```
+
+Web console 不再在构建期写入 worker token。打开页面后输入当前 worker token；浏览器只在当前会话保存 token，并且只把 `Authorization` 发送给配置的 API base 请求。
 
 当前支持的任务类型：
 
 - `keyword_search`
 - `direct_grab`
+- `search_only`
 
 ## Repository Layout
 
@@ -34,15 +54,26 @@
 
 ## Quick Start
 
-### 1. Local GUI debugging
+### 1. Worker service + Web console
 
-Use `gui_main.py` when you need manual local debugging or to keep the legacy workflow available.
-
-### 2. Worker service
-
-Run the AI-callable worker locally:
+Build the Web console first:
 
 ```bash
+cd web
+npm install
+npm run build
+```
+
+Then run the AI-callable worker locally:
+
+```bash
+STD_WORKER_API_TOKEN="change-me-worker-token" python run_worker.py
+```
+
+PowerShell:
+
+```powershell
+$env:STD_WORKER_API_TOKEN = "change-me-worker-token"
 python run_worker.py
 ```
 
@@ -52,16 +83,22 @@ Health check:
 curl http://127.0.0.1:8765/health
 ```
 
+Open `http://127.0.0.1:8765/` for the Web console.
+
+### 2. Local GUI debugging
+
+Use `gui_main.py` when you need manual local debugging or to keep the legacy workflow available.
+
 ### 3. Docker worker
 
 See [DEPLOY_DOCKER.md](DEPLOY_DOCKER.md) for the containerized headless deployment flow.
 
 ## Current Stage
 
-- The agent worker path is the primary focus.
+- The worker + Web console path is the primary focus.
 - Database write idempotency is handled by unique business keys plus upsert semantics.
 - Task tracking supports per-item status, result retrieval, and cancellation.
-- The repository still contains the local GUI because debugging is not fully agent-only yet.
+- The repository still contains the local GUI for compatibility and local debugging.
 
 ## Notes
 

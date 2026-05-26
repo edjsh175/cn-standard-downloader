@@ -46,6 +46,7 @@ DEFAULT_CONFIG = {
     "headless_browser": False,
     "worker_host": "127.0.0.1",
     "worker_port": 8765,
+    "worker_api_token": "",
 }
 
 ENV_CONFIG_MAP = {
@@ -65,6 +66,7 @@ ENV_CONFIG_MAP = {
     "STD_HEADLESS_BROWSER": "headless_browser",
     "STD_WORKER_HOST": "worker_host",
     "STD_WORKER_PORT": "worker_port",
+    "STD_WORKER_API_TOKEN": "worker_api_token",
 }
 
 
@@ -196,6 +198,7 @@ CHAOJIYING_SOFT_ID = ""
 HEADLESS_BROWSER = False
 WORKER_HOST = "127.0.0.1"
 WORKER_PORT = 8765
+WORKER_API_TOKEN = ""
 
 
 def _sync_dependent_modules() -> None:
@@ -238,7 +241,7 @@ def _sync_dependent_modules() -> None:
 def _recompute_runtime_fields() -> None:
     global INPUT_FILE, OUTPUT_FILE, BASE_PDF_DIR, TEMP_DIR, IMG_PATH, DEBUG_DIR
     global CHAOJIYING_USER, CHAOJIYING_PASS, CHAOJIYING_SOFT_ID, HEADLESS_BROWSER
-    global WORKER_HOST, WORKER_PORT
+    global WORKER_HOST, WORKER_PORT, WORKER_API_TOKEN
 
     OUTPUT_FILE = str(user_config.get("output_file", DEFAULT_CONFIG["output_file"]))
     INPUT_FILE = str(user_config.get("input_file", DEFAULT_CONFIG["input_file"]))
@@ -264,6 +267,7 @@ def _recompute_runtime_fields() -> None:
     HEADLESS_BROWSER = bool(user_config.get("headless_browser", False))
     WORKER_HOST = str(user_config.get("worker_host", DEFAULT_CONFIG["worker_host"]))
     WORKER_PORT = int(user_config.get("worker_port", DEFAULT_CONFIG["worker_port"]))
+    WORKER_API_TOKEN = str(user_config.get("worker_api_token", "")).strip()
 
     DOWNLOAD_PREFS.clear()
     DOWNLOAD_PREFS.update(

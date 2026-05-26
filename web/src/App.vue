@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import * as XLSX from "xlsx";
-import { cancelTask, createTask, fetchTaskResult, fetchTables } from "./api";
+import { cancelTask, createTask, downloadApiFile, fetchTaskResult, fetchTables, getApiToken, setApiToken } from "./api";
 import type { DirectGrabItem, DuplicatePolicy, TaskCreatePayload, TaskItem, TaskResultResponse } from "./types";
 
 type TabKey = "full" | "search" | "excel" | "url";
@@ -33,6 +33,7 @@ const activePreviewTaskId = ref("");
 const previewSelections = ref<Record<string, boolean>>({});
 const isBulkDownloading = ref(false);
 const pollingTimer = ref<number | null>(null);
+const apiTokenInput = ref(getApiToken());
 
 const form = reactive({
   keywordsText: "",
@@ -70,6 +71,7 @@ const previewReady = computed(
     activePreviewItems.value.length > 0,
 );
 const detectedUrlCount = computed(() => extractDetailUrls(form.urlText).length);
+const apiTokenButtonLabel = computed(() => (apiTokenInput.value.trim() ? "保存 token" : "清除 token"));
 
 function setBanner(text: string, tone: "info" | "error" | "success" = "info") {
   message.value = text;
@@ -148,6 +150,21 @@ function delay(ms: number) {
   });
 }
 
+function safeFileStem(value: string): string {
+  return value.trim().replace(/[\\/:*?"<>|]+/g, "_") || "download";
+}
+
+function artifactFallbackName(key: string): string {
+  if (key === "log_file") {
+    return "task.log";
+  }
+  return `${safeFileStem(key)}.xlsx`;
+}
+
+function pdfFallbackName(item: TaskItem): string {
+  return `${safeFileStem(item.code || item.name || `task-item-${item.id}`)}.pdf`;
+}
+
 function saveRecentTask(taskId: string) {
   const next = [taskId, ...recentTaskIds.value.filter((item) => item !== taskId)].slice(0, 8);
   recentTaskIds.value = next;
@@ -164,6 +181,18 @@ function loadRecentTasks() {
     recentTaskIds.value = Array.isArray(parsed) ? parsed.filter(Boolean).slice(0, 8) : [];
   } catch {
     recentTaskIds.value = [];
+  }
+}
+
+function applyApiToken() {
+  setApiToken(apiTokenInput.value);
+  apiTokenInput.value = getApiToken();
+  if (apiTokenInput.value) {
+    setBanner("API token 已保存到当前浏览器会话", "success");
+    void refreshTables();
+  } else {
+    tables.value = [];
+    setBanner("API token 已清除", "info");
   }
 }
 
@@ -289,18 +318,35 @@ async function downloadAllPdf() {
       if (!item.pdf_download_url) {
         continue;
       }
-      const anchor = document.createElement("a");
-      anchor.href = item.pdf_download_url;
-      anchor.style.display = "none";
-      anchor.rel = "noreferrer";
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
+      await downloadApiFile(item.pdf_download_url, pdfFallbackName(item));
       await delay(250);
     }
     setBanner(`已开始批量下载 ${downloadablePdfItems.value.length} 个 PDF，如浏览器提示请允许多文件下载`, "success");
+  } catch (error) {
+    setBanner((error as Error).message, "error");
   } finally {
     isBulkDownloading.value = false;
+  }
+}
+
+async function downloadArtifact(url: string, key: string) {
+  try {
+    const fileName = await downloadApiFile(url, artifactFallbackName(key));
+    setBanner(`已下载 ${fileName}`, "success");
+  } catch (error) {
+    setBanner((error as Error).message, "error");
+  }
+}
+
+async function downloadPdf(item: TaskItem) {
+  if (!item.pdf_download_url) {
+    return;
+  }
+  try {
+    const fileName = await downloadApiFile(item.pdf_download_url, pdfFallbackName(item));
+    setBanner(`已下载 ${fileName}`, "success");
+  } catch (error) {
+    setBanner((error as Error).message, "error");
   }
 }
 
@@ -411,7 +457,11 @@ async function handleExcelChange(event: Event) {
 
 onMounted(() => {
   loadRecentTasks();
-  void refreshTables();
+  if (getApiToken()) {
+    void refreshTables();
+  } else {
+    setBanner("请输入 worker API token 后再刷新表名", "info");
+  }
 });
 
 onBeforeUnmount(() => {
@@ -451,6 +501,20 @@ onBeforeUnmount(() => {
           <button class="ghost-btn" :disabled="isLoadingTables" @click="refreshTables">
             {{ isLoadingTables ? "刷新中..." : "刷新表名" }}
           </button>
+        </div>
+
+        <div class="auth-bar">
+          <label class="field token-field">
+            <span>API token</span>
+            <input
+              v-model="apiTokenInput"
+              type="password"
+              autocomplete="off"
+              placeholder="输入当前 worker token"
+              @keyup.enter="applyApiToken"
+            />
+          </label>
+          <button class="ghost-btn" type="button" @click="applyApiToken">{{ apiTokenButtonLabel }}</button>
         </div>
 
         <div class="global-grid">
@@ -685,16 +749,15 @@ onBeforeUnmount(() => {
           <div v-if="Object.keys(activeArtifacts).length > 0" class="detail-block">
             <h3>产物下载</h3>
             <div class="download-list">
-              <a
+              <button
                 v-for="(url, key) in activeArtifacts"
                 :key="key"
                 class="download-link"
-                :href="url"
-                target="_blank"
-                rel="noreferrer"
+                type="button"
+                @click="downloadArtifact(String(url), String(key))"
               >
                 下载 {{ key }}
-              </a>
+              </button>
             </div>
           </div>
 
@@ -754,14 +817,14 @@ onBeforeUnmount(() => {
                       <a :href="item.detail_url" target="_blank" rel="noreferrer">打开</a>
                     </td>
                     <td>
-                      <a
+                      <button
                         v-if="item.pdf_download_url"
-                        :href="item.pdf_download_url"
-                        target="_blank"
-                        rel="noreferrer"
+                        class="text-link"
+                        type="button"
+                        @click="downloadPdf(item)"
                       >
                         下载 PDF
-                      </a>
+                      </button>
                       <span v-else>-</span>
                     </td>
                   </tr>
