@@ -74,14 +74,34 @@ export interface TaskPayloadResult {
     detail_url: string;
     code?: string;
     error_type?: string;
+    error_code?: string;
+    retryable?: boolean;
     message: string;
   }>;
+}
+
+export interface AgentStatus {
+  lifecycle: string;
+  terminal: boolean;
+  outcome:
+    | "pending"
+    | "results_available"
+    | "no_results"
+    | "downloaded"
+    | "partial_downloaded"
+    | "blocked_captcha"
+    | "not_public"
+    | "failed";
+  retryable: boolean;
+  error_code: string | null;
+  next_actions: string[];
 }
 
 export interface TaskDetail {
   id: string;
   task_type: TaskType;
   status: string;
+  agent_status?: AgentStatus;
   table_name: string;
   request_payload: Record<string, unknown>;
   result_payload: TaskPayloadResult | null;
@@ -109,6 +129,7 @@ export interface TaskItem {
 export interface TaskResultResponse {
   task_id: string;
   status: string;
+  agent_status?: AgentStatus;
   result: TaskPayloadResult | null;
   items: TaskItem[];
   error_message: string | null;

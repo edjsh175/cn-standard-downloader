@@ -15,6 +15,9 @@ class FakeTaskStore:
         self.created_task_type = None
         self.created_payload = None
         self.item = None
+        self.result_payload = None
+        self.items = []
+        self.status = "pending"
 
     def create_task(self, task_type, payload):
         self.created_task_type = task_type
@@ -25,10 +28,10 @@ class FakeTaskStore:
         return {
             "id": task_id,
             "task_type": self.created_task_type,
-            "status": "pending",
+            "status": self.status,
             "table_name": (self.created_payload or {}).get("table_name", ""),
             "request_payload": self.created_payload,
-            "result_payload": None,
+            "result_payload": self.result_payload,
             "error_message": None,
             "cancel_requested": False,
             "created_at": "2026-05-25T00:00:00",
@@ -40,8 +43,20 @@ class FakeTaskStore:
     def get_task_item(self, task_id, item_id):
         return self.item
 
+    def list_task_items(self, task_id):
+        return list(self.items)
+
 
 class FakeHttpService:
+    def get_capabilities(self):
+        return {
+            "api_version": "2026-05-28",
+            "task_types": ["search_only", "direct_grab", "keyword_search"],
+            "terminal_states": ["succeeded", "failed", "partial_failed", "cancelled"],
+            "artifact_names": ["search_results", "failed_results", "log_file"],
+            "recommended_workflow": ["search_only", "direct_grab"],
+        }
+
     def list_tables(self):
         return ["gb_standards"]
 
@@ -168,6 +183,24 @@ class WorkerApiAuthTests(unittest.TestCase):
         self.assertEqual(status, 201)
         self.assertEqual(payload["id"], "task-1")
 
+    def test_capabilities_requires_bearer_token(self):
+        status, payload = self.request("GET", "/api/capabilities")
+
+        self.assertEqual(status, 401)
+        self.assertEqual(payload, {"error": "unauthorized"})
+
+    def test_capabilities_with_bearer_token_returns_agent_contract_metadata(self):
+        status, payload = self.request(
+            "GET",
+            "/api/capabilities",
+            headers={"Authorization": "Bearer secret-token"},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["api_version"], "2026-05-28")
+        self.assertEqual(payload["recommended_workflow"], ["search_only", "direct_grab"])
+        self.assertIn("search_results", payload["artifact_names"])
+
 
 class TaskWorkerServiceValidationTests(unittest.TestCase):
     def test_search_only_rejects_invalid_per_keyword_limit(self):
@@ -181,6 +214,21 @@ class TaskWorkerServiceValidationTests(unittest.TestCase):
                     "per_keyword_limit": 0,
                 }
             )
+
+    def test_submit_task_attaches_agent_status(self):
+        store = FakeTaskStore()
+        service = make_service(store)
+
+        task = service.submit_task(
+            {
+                "task_type": "search_only",
+                "keywords": ["AI"],
+                "per_keyword_limit": 1,
+            }
+        )
+
+        self.assertEqual(task["agent_status"]["outcome"], "pending")
+        self.assertIn("poll_task", task["agent_status"]["next_actions"])
 
     def test_direct_grab_normalizes_detail_urls_before_queuing_task(self):
         store = FakeTaskStore()
@@ -214,6 +262,41 @@ class TaskWorkerServiceValidationTests(unittest.TestCase):
         artifact = service.get_task_item_pdf(task_id, 1)
 
         self.assertIsNone(artifact)
+
+    def test_get_task_attaches_agent_status(self):
+        store = FakeTaskStore()
+        store.created_task_type = "search_only"
+        store.created_payload = {"task_type": "search_only", "keywords": ["AI"]}
+        store.status = "succeeded"
+        store.result_payload = {"summary": {"total": 1, "succeeded": 1, "failed": 0, "skipped": 0}}
+        service = make_service(store)
+
+        task = service.get_task("task-1")
+
+        self.assertEqual(task["agent_status"]["outcome"], "results_available")
+        self.assertIn("select_items_for_direct_grab", task["agent_status"]["next_actions"])
+
+    def test_get_task_result_attaches_agent_status_and_error_codes(self):
+        store = FakeTaskStore()
+        store.created_task_type = "direct_grab"
+        store.created_payload = {"task_type": "direct_grab", "table_name": "gb_standards"}
+        store.status = "failed"
+        store.result_payload = {
+            "summary": {"total": 1, "succeeded": 0, "failed": 1, "skipped": 0},
+            "errors": [
+                {
+                    "detail_url": "https://std.samr.gov.cn/gb/search/gbDetailed?id=GB1",
+                    "message": "captcha recognize failed: 无可用题分",
+                }
+            ],
+        }
+        service = make_service(store)
+
+        result = service.get_task_result("task-1")
+
+        self.assertEqual(result["agent_status"]["outcome"], "blocked_captcha")
+        self.assertEqual(result["result"]["errors"][0]["error_code"], "CAPTCHA_NO_BALANCE")
+        self.assertTrue(result["result"]["errors"][0]["retryable"])
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from urllib.parse import quote, urlparse
 
 import config
 
+from app.agent_contract import annotate_errors, build_agent_status, get_capabilities
 from app.db_utils import validate_table_name
 from app.pipeline import PipelineRunner
 from app.task_store import DEFAULT_BUSINESS_TABLE_NAME, TaskStore
@@ -115,10 +116,13 @@ class TaskWorkerService:
 
         task_id = self.task_store.create_task(task_type, payload)
         self.task_queue.put(task_id)
-        return self.task_store.get_task(task_id)
+        return self.get_task(task_id)
 
     def list_tables(self):
         return self.task_store.list_tables()
+
+    def get_capabilities(self):
+        return get_capabilities()
 
     @staticmethod
     def _task_artifact_root(task_id: str) -> str:
@@ -222,8 +226,15 @@ class TaskWorkerService:
                     row[key] = item[key]
             errors.append(row)
         if errors:
-            payload["errors"] = errors
+            payload["errors"] = annotate_errors(errors)
         return payload
+
+    @staticmethod
+    def _attach_agent_status(task: dict, result_payload: dict | None = None):
+        task_type = task.get("task_type")
+        status = task.get("status")
+        payload = result_payload if result_payload is not None else task.get("result_payload")
+        return build_agent_status(task_type, status, payload, task.get("error_message"))
 
     def get_task(self, task_id: str):
         task = self.task_store.get_task(task_id)
@@ -231,6 +242,8 @@ class TaskWorkerService:
             return None
         task = dict(task)
         task["result_payload"] = self._attach_result_urls(task_id, task.get("result_payload"))
+        task["result_payload"] = self._attach_error_display_fields(task["result_payload"], [])
+        task["agent_status"] = self._attach_agent_status(task)
         return task
 
     def get_task_result(self, task_id: str):
@@ -240,9 +253,11 @@ class TaskWorkerService:
         items = self._attach_item_urls(task_id, self.task_store.list_task_items(task_id))
         result = self._attach_result_urls(task_id, task.get("result_payload"))
         result = self._attach_error_display_fields(result, items)
+        agent_status = self._attach_agent_status(task, result)
         return {
             "task_id": task["id"],
             "status": task["status"],
+            "agent_status": agent_status,
             "result": result,
             "items": items,
             "error_message": task["error_message"],
@@ -408,6 +423,14 @@ class WorkerRequestHandler(BaseHTTPRequestHandler):
 
         if path in {"/health", "/api/health"}:
             self._write_json(HTTPStatus.OK, {"status": "ok"})
+            return
+
+        if path == "/api/capabilities":
+            try:
+                capabilities = self.service.get_capabilities()  # type: ignore[union-attr]
+                self._write_json(HTTPStatus.OK, capabilities)
+            except Exception as exc:
+                self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
             return
 
         if path == "/api/tables":

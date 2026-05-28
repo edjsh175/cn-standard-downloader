@@ -196,6 +196,16 @@ class BatchCrawler:
         except Exception:
             return False
 
+    @staticmethod
+    def _first_visible_enabled(elements):
+        for element in elements:
+            try:
+                if element.is_displayed() and element.is_enabled():
+                    return element
+            except Exception:
+                continue
+        return elements[0] if elements else None
+
     def _safe_current_url(self, default=""):
         try:
             return self.driver.current_url
@@ -1012,13 +1022,14 @@ class BatchCrawler:
             view_text_xpath = "//*[contains(concat(' ', normalize-space(@class), ' '), ' openpdf ')]"
 
         view_buttons = self.driver.find_elements(By.XPATH, view_text_xpath)
-        if not view_buttons:
+        view_button = self._first_visible_enabled(view_buttons)
+        if not view_button:
             meta["ps"] = f"view text button not found: {view_text_xpath}"
             self._add_failed_item(row, meta["ps"])
             return False
 
         current_handles = self.driver.window_handles
-        WebDriverWait(self.driver, self.WAIT_TIME).until(EC.element_to_be_clickable((By.XPATH, view_text_xpath))).click()
+        self.driver.execute_script("arguments[0].click();", view_button)
         WebDriverWait(self.driver, self.WAIT_TIME).until(EC.new_window_is_opened(current_handles))
         preview_handle = [handle for handle in self.driver.window_handles if handle not in current_handles][0]
         self.driver.switch_to.window(preview_handle)
