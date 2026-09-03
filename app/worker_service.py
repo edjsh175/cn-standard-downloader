@@ -249,6 +249,7 @@ class TaskWorkerService:
                         row[key] = value
             if row.get("pdf_path"):
                 row["pdf_download_url"] = self._pdf_url(task_id, int(row["id"]))
+                row["pdf_path"] = None
             normalized.append(row)
         return normalized
 

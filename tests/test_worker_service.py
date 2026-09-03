@@ -345,6 +345,20 @@ class TaskWorkerServiceValidationTests(unittest.TestCase):
         self.assertGreater(metadata["size_bytes"], 0)
         self.assertNotIn("path", metadata)
 
+    def test_task_items_expose_pdf_url_without_server_filesystem_path(self):
+        store = FakeTaskStore()
+        service = make_service(store)
+        store.items = [{
+            "id": 1,
+            "detail_url": "https://std.samr.gov.cn/detail?id=1",
+            "pdf_path": "C:\\private\\artifacts\\task-1\\pdf\\one.pdf",
+        }]
+
+        item = service._attach_item_urls("task-1", store.items)[0]
+
+        self.assertIsNone(item["pdf_path"])
+        self.assertEqual(item["pdf_download_url"], "api/tasks/task-1/items/1/pdf")
+
 
 if __name__ == "__main__":
     unittest.main()
