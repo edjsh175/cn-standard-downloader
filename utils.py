@@ -173,31 +173,52 @@ def _build_chrome_service():
     return Service(ChromeDriverManager().install())
 
 
+def build_chrome_arguments(
+    headless: bool,
+    allow_insecure_browser_flags: bool = False,
+    allow_remote_debugging: bool = False,
+) -> list[str]:
+    arguments = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-software-rasterizer",
+        "--hide-scrollbars",
+        "--window-size=1920,1080",
+    ]
+    if allow_insecure_browser_flags:
+        arguments.extend(
+            [
+                "--ignore-certificate-errors",
+                "--allow-running-insecure-content",
+                "--disable-web-security",
+            ]
+        )
+    if headless:
+        arguments.append("--headless=new")
+        if allow_remote_debugging:
+            arguments.append("--remote-debugging-port=9222")
+    return arguments
+
+
 def init_driver(download_dir=None):
     opts = Options()
     opts.page_load_strategy = "eager"
     opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     opts.add_experimental_option("useAutomationExtension", False)
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--ignore-certificate-errors")
-    opts.add_argument("--allow-running-insecure-content")
-    opts.add_argument("--disable-web-security")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--disable-software-rasterizer")
-    opts.add_argument("--hide-scrollbars")
-    opts.add_argument("--window-size=1920,1080")
+    for argument in build_chrome_arguments(
+        headless=config.HEADLESS_BROWSER,
+        allow_insecure_browser_flags=config.ALLOW_INSECURE_BROWSER_FLAGS,
+        allow_remote_debugging=config.ALLOW_BROWSER_REMOTE_DEBUGGING,
+    ):
+        opts.add_argument(argument)
     opts.set_capability("goog:loggingPrefs", {"performance": "ALL", "browser": "ALL"})
 
     prefs = config.DOWNLOAD_PREFS.copy()
     if download_dir:
         prefs["download.default_directory"] = os.path.abspath(download_dir)
     opts.add_experimental_option("prefs", prefs)
-
-    if config.HEADLESS_BROWSER:
-        opts.add_argument("--headless=new")
-        opts.add_argument("--remote-debugging-port=9222")
 
     chrome_binary = _get_chrome_binary_path()
     if chrome_binary is not None:

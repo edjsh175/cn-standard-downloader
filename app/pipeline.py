@@ -1,26 +1,26 @@
 import os
-from contextlib import contextmanager
 from typing import Any
 
 import config
 from grab_module import BatchCrawler
 from search_module import search_standards_with_output
 from utils import ensure_dir, normalize_detail_url, write_excel
-
-
-@contextmanager
-def working_directory(path: str):
-    original_cwd = os.getcwd()
-    os.chdir(path)
-    try:
-        yield
-    finally:
-        os.chdir(original_cwd)
+from app.executor_protocol import CrawlerFactory, ExcelWriter, SearchExecutor
+from app.run_evidence import RunEvidence
 
 
 class PipelineRunner:
-    def __init__(self, task_store):
+    def __init__(
+        self,
+        task_store,
+        search_executor: SearchExecutor | None = None,
+        crawler_factory: CrawlerFactory | None = None,
+        excel_writer: ExcelWriter | None = None,
+    ):
         self.task_store = task_store
+        self.search_executor = search_executor or search_standards_with_output
+        self.crawler_factory = crawler_factory or BatchCrawler
+        self.excel_writer = excel_writer or write_excel
 
     def _artifact_root(self, task_id: str) -> str:
         return os.path.join(config.get_base_dir(), "artifacts", "tasks", task_id)
@@ -119,6 +119,7 @@ class PipelineRunner:
                         "detail_url": detail_url,
                         "code": resolved_fields["code"],
                         "error_type": failure.get("error_type"),
+                        "error_code": failure.get("error_code"),
                         "message": failure.get("fail_reason"),
                     }
                 )
@@ -230,23 +231,30 @@ class PipelineRunner:
         keywords = payload.get("keywords") or []
         per_keyword_limit = payload.get("per_keyword_limit")
         search_result = None
+        evidence = RunEvidence()
 
         self._check_cancelled(task_id)
         if task_type in {"keyword_search", "search_only"}:
-            search_result = search_standards_with_output(
-                keywords,
-                output_filename=search_output,
-                log_file=task_log,
-                cancel_checker=lambda: self.task_store.is_cancel_requested(task_id),
-                per_keyword_limit=per_keyword_limit,
-            )
+            phase_started = evidence.begin()
+            try:
+                search_result = self.search_executor(
+                    keywords,
+                    output_filename=search_output,
+                    log_file=task_log,
+                    cancel_checker=lambda: self.task_store.is_cancel_requested(task_id),
+                    per_keyword_limit=per_keyword_limit,
+                )
+            finally:
+                evidence.finish("search", phase_started, items=len((search_result or {}).get("records") or []))
             items = search_result["records"]
         elif task_type == "direct_grab":
+            phase_started = evidence.begin()
             if payload.get("items"):
                 items = self._normalize_direct_items(payload["items"])
             else:
                 items = self._build_direct_url_items(payload.get("detail_urls") or [])
-            write_excel(items, search_output)
+            self.excel_writer(items, search_output)
+            evidence.finish("prepare_items", phase_started, items=len(items))
         else:
             raise ValueError(f"Unsupported task type: {task_type}")
 
@@ -256,7 +264,7 @@ class PipelineRunner:
         search_summary = self._normalize_search_summary(search_result, items)
 
         if task_type == "search_only":
-            return {
+            return evidence.attach({
                 "task_id": task_id,
                 "status": "succeeded",
                 "summary": {
@@ -296,10 +304,10 @@ class PipelineRunner:
                 },
                 "errors": [],
                 "postprocess_status": "not_started",
-            }
+            })
 
         if not items:
-            return {
+            return evidence.attach({
                 "task_id": task_id,
                 "status": "succeeded",
                 "summary": {"total": 0, "succeeded": 0, "failed": 0, "skipped": 0},
@@ -334,9 +342,9 @@ class PipelineRunner:
                 },
                 "errors": [],
                 "postprocess_status": "not_started",
-            }
+            })
 
-        crawler = BatchCrawler(
+        crawler = self.crawler_factory(
             log_file=task_log,
             cancel_checker=lambda: self.task_store.is_cancel_requested(task_id),
             duplicate_policy=payload.get("duplicate_policy", "overwrite"),
@@ -360,22 +368,29 @@ class PipelineRunner:
         failed_artifact_name = None
         crawl_result = None
         try:
-            with working_directory(artifact_root):
-                crawl_result = crawler.run(
-                    search_output,
-                    generate_failed_output=True,
-                    failed_keywords=keywords or None,
-                )
-                failed_output_path = (crawl_result or {}).get("failed_output_file")
-                if failed_output_path:
-                    failed_artifact_name = os.path.basename(failed_output_path)
+            phase_started = evidence.begin()
+            crawl_result = crawler.run(
+                search_output,
+                generate_failed_output=True,
+                failed_keywords=keywords or None,
+                failed_output_dir=artifact_root,
+            )
+            failed_output_path = (crawl_result or {}).get("failed_output_file")
+            if failed_output_path:
+                failed_artifact_name = os.path.basename(failed_output_path)
+            evidence.finish("download", phase_started, items=len(items))
         except RuntimeError:
             if crawler.failed_items:
-                with working_directory(artifact_root):
-                    failed_artifact_name = crawler.generate_failed_excel(keywords=keywords or None)
+                failed_output_path = crawler.generate_failed_excel(
+                    keywords=keywords or None,
+                    output_dir=artifact_root,
+                )
+                if failed_output_path:
+                    failed_artifact_name = os.path.basename(failed_output_path)
             self._finalize_task_items(task_id, items, saved_results, crawler.processed_results, crawler.failed_items)
             raise
 
+        phase_started = evidence.begin()
         success_count, failure_count, write_counts, errors = self._finalize_task_items(
             task_id,
             items,
@@ -383,6 +398,7 @@ class PipelineRunner:
             crawler.processed_results,
             crawler.failed_items,
         )
+        evidence.finish("finalize", phase_started, succeeded=success_count, failed=failure_count)
         download_summary = (crawl_result or {}).get("download_summary") or self._summarize_downloads(
             items,
             crawler.download_summaries,
@@ -393,7 +409,7 @@ class PipelineRunner:
             resolved_failed_output = os.path.join(artifact_root, failed_artifact_name)
         task_status = self._task_status_from_counts(success_count, failure_count)
 
-        return {
+        return evidence.attach({
             "task_id": task_id,
             "status": task_status,
             "summary": {
@@ -426,4 +442,4 @@ class PipelineRunner:
             "download_summary": download_summary,
             "errors": errors,
             "postprocess_status": "not_started",
-        }
+        })

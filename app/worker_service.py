@@ -3,7 +3,10 @@ import hmac
 import mimetypes
 import os
 import queue
+import socket
+import shutil
 import threading
+import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, urlparse
@@ -11,9 +14,11 @@ from urllib.parse import quote, urlparse
 import config
 
 from app.agent_contract import annotate_errors, build_agent_status, get_capabilities
+from app.artifacts import build_artifact_metadata
 from app.db_utils import validate_table_name
 from app.pipeline import PipelineRunner
 from app.task_store import DEFAULT_BUSINESS_TABLE_NAME, TaskStore
+from app.tool_contract import MAX_DIRECT_ITEMS, MAX_KEYWORDS, MAX_REQUEST_BODY_BYTES as CONTRACT_MAX_REQUEST_BODY_BYTES
 from utils import extract_detail_urls_from_text, normalize_detail_url
 
 
@@ -22,6 +27,10 @@ class TaskWorkerService:
         self.task_store = TaskStore()
         self.pipeline = PipelineRunner(self.task_store)
         self.task_queue = queue.Queue()
+        self.worker_id = f"{socket.gethostname()}:{os.getpid()}"
+        self.task_store.recover_expired_tasks()
+        for task_id in self.task_store.list_runnable_task_ids():
+            self.task_queue.put(task_id)
 
     @staticmethod
     def _normalize_per_keyword_limit(value):
@@ -70,6 +79,13 @@ class TaskWorkerService:
         return normalized
 
     def submit_task(self, payload: dict):
+        idempotency_key = payload.get("idempotency_key")
+        if idempotency_key is not None:
+            normalized_key = str(idempotency_key).strip()
+            if not normalized_key or len(normalized_key) > 128:
+                raise ValueError("idempotency_key must be a non-empty string of at most 128 characters")
+            payload["idempotency_key"] = normalized_key
+
         task_type = payload.get("task_type")
         if task_type not in {"keyword_search", "direct_grab", "search_only"}:
             raise ValueError("task_type must be keyword_search, direct_grab, or search_only")
@@ -87,6 +103,8 @@ class TaskWorkerService:
             keywords = payload.get("keywords")
             if not isinstance(keywords, list) or not [kw for kw in keywords if str(kw).strip()]:
                 raise ValueError("keywords must be a non-empty list")
+            if len(keywords) > MAX_KEYWORDS:
+                raise ValueError(f"keywords must contain at most {MAX_KEYWORDS} items")
             payload["keywords"] = [str(keyword).strip() for keyword in keywords if str(keyword).strip()]
             payload["per_keyword_limit"] = self._normalize_per_keyword_limit(payload.get("per_keyword_limit"))
 
@@ -95,6 +113,8 @@ class TaskWorkerService:
             if items is not None:
                 if not isinstance(items, list) or not items:
                     raise ValueError("items must be a non-empty list")
+                if len(items) > MAX_DIRECT_ITEMS:
+                    raise ValueError(f"items must contain at most {MAX_DIRECT_ITEMS} items")
             else:
                 detail_urls = self._normalize_detail_urls(payload.get("detail_urls"))
                 url_text = payload.get("url_text")
@@ -112,6 +132,8 @@ class TaskWorkerService:
 
                 if not merged_urls:
                     raise ValueError("direct_grab requires non-empty items, detail_urls, or url_text")
+                if len(merged_urls) > MAX_DIRECT_ITEMS:
+                    raise ValueError(f"detail_urls must contain at most {MAX_DIRECT_ITEMS} items")
                 payload["detail_urls"] = merged_urls
 
         task_id = self.task_store.create_task(task_type, payload)
@@ -155,7 +177,13 @@ class TaskWorkerService:
             if not path:
                 return None
             resolved = os.path.abspath(path)
-            if not os.path.exists(resolved):
+            task_root = os.path.abspath(artifact_root)
+            try:
+                if os.path.commonpath([resolved, task_root]) != task_root:
+                    return None
+            except ValueError:
+                return None
+            if not os.path.isfile(resolved):
                 return None
             return resolved
         return None
@@ -189,11 +217,21 @@ class TaskWorkerService:
         payload = dict(result_payload)
         artifacts = dict(payload.get("artifacts") or {})
         artifact_urls = {}
+        artifact_metadata = {}
+        public_artifacts = {}
         for artifact_name in ("search_results", "failed_results", "log_file"):
             if artifacts.get(artifact_name):
-                artifact_urls[artifact_name] = self._artifact_url(task_id, artifact_name)
+                path = self._artifact_path(task_id, artifact_name)
+                if path:
+                    artifact_urls[artifact_name] = self._artifact_url(task_id, artifact_name)
+                    artifact_metadata[artifact_name] = build_artifact_metadata(path, artifact_name)
+                public_artifacts[artifact_name] = None
+        if artifacts:
+            payload["artifacts"] = public_artifacts
         if artifact_urls:
             payload["artifact_urls"] = artifact_urls
+        if artifact_metadata:
+            payload["artifact_metadata"] = artifact_metadata
         return payload
 
     def _attach_item_urls(self, task_id: str, items: list[dict]):
@@ -291,7 +329,12 @@ class TaskWorkerService:
                     self.task_store.mark_cancelled(task_id)
                     continue
 
-                self.task_store.mark_running(task_id)
+                claim_task = getattr(self.task_store, "claim_task", None)
+                if claim_task is not None:
+                    if not claim_task(task_id, self.worker_id):
+                        continue
+                else:
+                    self.task_store.mark_running(task_id)
                 result = self.pipeline.execute(task_id)
                 if self.task_store.is_cancel_requested(task_id):
                     self.task_store.mark_cancelled(task_id, result_payload=result)
@@ -313,44 +356,107 @@ class TaskWorkerService:
             except Exception as exc:
                 self.task_store.mark_failed(task_id, str(exc))
             finally:
+                release_lease = getattr(self.task_store, "release_lease", None)
+                if release_lease is not None:
+                    release_lease(task_id, self.worker_id)
                 self.task_queue.task_done()
 
 
 class WorkerRequestHandler(BaseHTTPRequestHandler):
     service: TaskWorkerService | None = None
+    MAX_REQUEST_BODY_BYTES = CONTRACT_MAX_REQUEST_BODY_BYTES
 
     def log_message(self, format, *args):
         return
 
     def _read_json(self):
-        content_length = int(self.headers.get("Content-Length", "0"))
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            raise ValueError("Content-Length must be a non-negative integer") from None
+        if content_length < 0:
+            raise ValueError("Content-Length must be a non-negative integer")
+        if content_length > self.MAX_REQUEST_BODY_BYTES:
+            raise ValueError("request body too large")
         if content_length == 0:
             return {}
+        content_type = str(self.headers.get("Content-Type") or "").lower()
+        if not content_type.startswith("application/json"):
+            raise ValueError("Content-Type must be application/json")
         raw_body = self.rfile.read(content_length)
-        return json.loads(raw_body.decode("utf-8"))
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ValueError("request body must be valid JSON") from None
+        if not isinstance(payload, dict):
+            raise ValueError("request body must be a JSON object")
+        return payload
+
+    @staticmethod
+    def public_error_payload(error_kind: str, detail: str | None = None) -> dict:
+        if error_kind == "invalid_input":
+            code = "INVALID_INPUT"
+            message = detail or "invalid request"
+            category = "request"
+            retryable = False
+        elif error_kind == "request_too_large":
+            code = "REQUEST_BODY_TOO_LARGE"
+            message = "request body too large"
+            category = "request"
+            retryable = False
+        else:
+            code = "INTERNAL_ERROR"
+            message = "internal server error"
+            category = "internal"
+            retryable = False
+        return {
+            "error": {
+                "code": code,
+                "message": message,
+                "category": category,
+                "retryable": retryable,
+            },
+            "request_id": str(uuid.uuid4()),
+        }
+
+    def _write_public_error(self, status: int, error_kind: str, detail: str | None = None):
+        self._write_json(status, self.public_error_payload(error_kind, detail))
 
     def _write_json(self, status: int, payload: dict):
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
+        self.send_header("X-Request-ID", self._request_id())
         self.end_headers()
         self.wfile.write(encoded)
 
+    def _request_id(self) -> str:
+        request_id = getattr(self, "_current_request_id", None)
+        if request_id:
+            return request_id
+        candidate = str(self.headers.get("X-Request-ID") or "").strip()
+        if candidate and len(candidate) <= 64 and all(char.isalnum() or char in "-_." for char in candidate):
+            request_id = candidate
+        else:
+            request_id = str(uuid.uuid4())
+        self._current_request_id = request_id
+        return request_id
+
     def _write_file(self, status: int, path: str, download_name: str, as_attachment: bool = True):
-        with open(path, "rb") as file_obj:
-            data = file_obj.read()
         content_type = mimetypes.guess_type(download_name)[0] or "application/octet-stream"
+        content_length = os.path.getsize(path)
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Length", str(content_length))
         if as_attachment:
             fallback_name = download_name.encode("ascii", "ignore").decode("ascii").replace('"', "_") or "download"
             encoded_name = quote(download_name, safe="")
             disposition = f"attachment; filename=\"{fallback_name}\"; filename*=UTF-8''{encoded_name}"
             self.send_header("Content-Disposition", disposition)
         self.end_headers()
-        self.wfile.write(data)
+        with open(path, "rb") as file_obj:
+            shutil.copyfileobj(file_obj, self.wfile, length=1024 * 1024)
 
     @staticmethod
     def _normalize_path(path: str):
@@ -429,16 +535,16 @@ class WorkerRequestHandler(BaseHTTPRequestHandler):
             try:
                 capabilities = self.service.get_capabilities()  # type: ignore[union-attr]
                 self._write_json(HTTPStatus.OK, capabilities)
-            except Exception as exc:
-                self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            except Exception:
+                self._write_public_error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error")
             return
 
         if path == "/api/tables":
             try:
                 tables = self.service.list_tables()  # type: ignore[union-attr]
                 self._write_json(HTTPStatus.OK, {"tables": tables})
-            except Exception as exc:
-                self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+            except Exception:
+                self._write_public_error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error")
             return
 
         parts = self._normalize_path(path)
@@ -500,9 +606,10 @@ class WorkerRequestHandler(BaseHTTPRequestHandler):
                 task = self.service.submit_task(payload)  # type: ignore[union-attr]
                 self._write_json(HTTPStatus.CREATED, task)
             except ValueError as exc:
-                self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-            except Exception as exc:
-                self._write_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+                error_kind = "request_too_large" if str(exc) == "request body too large" else "invalid_input"
+                self._write_public_error(HTTPStatus.BAD_REQUEST, error_kind, str(exc))
+            except Exception:
+                self._write_public_error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error")
             return
 
         parts = self._normalize_path(path)

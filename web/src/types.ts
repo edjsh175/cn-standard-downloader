@@ -11,6 +11,7 @@ export interface DirectGrabItem {
 
 export interface TaskCreatePayload {
   task_type: TaskType;
+  idempotency_key?: string;
   table_name?: string;
   duplicate_policy?: DuplicatePolicy;
   keywords?: string[];
@@ -29,12 +30,25 @@ export interface TaskArtifacts {
   debug_dir?: string | null;
 }
 
+export interface ArtifactMetadata {
+  name: string;
+  content_type: string;
+  size_bytes: number;
+  sha256: string;
+  created_at?: string;
+}
+
 export interface SearchSummary {
   keywords: string[];
   per_keyword_limit: number | null;
   raw_count: number;
   deduplicated_count: number;
   per_keyword_counts: Record<string, number>;
+}
+
+export interface RunEvidence {
+  duration_ms: number;
+  phases: Record<string, { duration_ms: number; [key: string]: number }>;
 }
 
 export interface TaskPayloadResult {
@@ -52,6 +66,8 @@ export interface TaskPayloadResult {
   search_summary?: SearchSummary;
   artifacts?: TaskArtifacts;
   artifact_urls?: Record<string, string>;
+  artifact_metadata?: Record<string, ArtifactMetadata>;
+  run_evidence?: RunEvidence;
   db_write_summary?: {
     table_name: string;
     duplicate_policy: DuplicatePolicy;
@@ -76,6 +92,7 @@ export interface TaskPayloadResult {
     error_type?: string;
     error_code?: string;
     retryable?: boolean;
+    category?: string;
     message: string;
   }>;
 }

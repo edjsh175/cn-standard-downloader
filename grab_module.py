@@ -1276,7 +1276,7 @@ class BatchCrawler:
             if should_save:
                 self.save_db(meta, final_pdf)
 
-    def run(self, excel_file=None, generate_failed_output=False, failed_keywords=None):
+    def run(self, excel_file=None, generate_failed_output=False, failed_keywords=None, failed_output_dir=None):
         total_items = 0
         failed_output_file = None
         try:
@@ -1301,7 +1301,10 @@ class BatchCrawler:
                 self.logger.info(f"progress: {index}/{len(df)}")
 
             if generate_failed_output:
-                failed_output_file = self.generate_failed_excel(keywords=failed_keywords)
+                failed_output_file = self.generate_failed_excel(
+                    keywords=failed_keywords,
+                    output_dir=failed_output_dir,
+                )
 
             self.clear_temp()
             return self._build_run_summary(total_items=total_items, failed_output_file=failed_output_file)
@@ -1316,7 +1319,7 @@ class BatchCrawler:
             except Exception:
                 pass
 
-    def generate_failed_excel(self, keywords=None, sort_by="error_type"):
+    def generate_failed_excel(self, keywords=None, sort_by="error_type", output_dir=None):
         if not self.failed_items:
             self.logger.info("no failed items, skip failed excel")
             return None
@@ -1354,6 +1357,9 @@ class BatchCrawler:
             filename = f"failed_items_{'_'.join(str(keyword) for keyword in keywords)}.xlsx"
         else:
             filename = "failed_items.xlsx"
+        if output_dir:
+            ensure_dir(output_dir)
+            filename = os.path.join(output_dir, filename)
         filename = self._ensure_unique_filename(filename)
         df.to_excel(filename, index=False)
         return filename

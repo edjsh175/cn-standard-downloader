@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
+from unittest.mock import patch
 
 import config
 from app.worker_service import TaskWorkerService, WorkerRequestHandler
@@ -215,6 +216,31 @@ class TaskWorkerServiceValidationTests(unittest.TestCase):
                 }
             )
 
+    def test_search_only_rejects_more_keywords_than_agent_contract_limit(self):
+        service = make_service()
+
+        with self.assertRaisesRegex(ValueError, "keywords must contain at most 50 items"):
+            service.submit_task(
+                {
+                    "task_type": "search_only",
+                    "keywords": [f"keyword-{index}" for index in range(51)],
+                }
+            )
+
+    def test_direct_grab_rejects_more_items_than_agent_contract_limit(self):
+        service = make_service()
+
+        with self.assertRaisesRegex(ValueError, "items must contain at most 500 items"):
+            service.submit_task(
+                {
+                    "task_type": "direct_grab",
+                    "items": [
+                        {"detail_url": f"https://std.samr.gov.cn/gb/search/gbDetailed?id={index}"}
+                        for index in range(501)
+                    ],
+                }
+            )
+
     def test_submit_task_attaches_agent_status(self):
         store = FakeTaskStore()
         service = make_service(store)
@@ -297,6 +323,27 @@ class TaskWorkerServiceValidationTests(unittest.TestCase):
         self.assertEqual(result["agent_status"]["outcome"], "blocked_captcha")
         self.assertEqual(result["result"]["errors"][0]["error_code"], "CAPTCHA_NO_BALANCE")
         self.assertTrue(result["result"]["errors"][0]["retryable"])
+
+    def test_result_exposes_artifact_integrity_metadata_without_local_path(self):
+        store = FakeTaskStore()
+        service = make_service(store)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            artifact_root = os.path.join(temp_dir, "artifacts", "tasks", "task-1")
+            os.makedirs(artifact_root)
+            search_path = os.path.join(artifact_root, "search_results.xlsx")
+            with open(search_path, "wb") as stream:
+                stream.write(b"search-result-artifact")
+
+            with patch.object(config, "get_base_dir", return_value=temp_dir):
+                result = service._attach_result_urls(
+                    "task-1",
+                    {"artifacts": {"search_results": search_path}},
+                )
+
+        metadata = result["artifact_metadata"]["search_results"]
+        self.assertEqual(metadata["name"], "search_results")
+        self.assertGreater(metadata["size_bytes"], 0)
+        self.assertNotIn("path", metadata)
 
 
 if __name__ == "__main__":

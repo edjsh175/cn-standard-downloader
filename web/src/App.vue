@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import * as XLSX from "xlsx";
 import { cancelTask, createTask, downloadApiFile, fetchTaskResult, fetchTables, getApiToken, setApiToken } from "./api";
+import { normalizeExcelRows, validateExcelUpload } from "./excel";
 import type { DirectGrabItem, DuplicatePolicy, TaskCreatePayload, TaskItem, TaskResultResponse } from "./types";
 
 type TabKey = "full" | "search" | "excel" | "url";
@@ -426,18 +427,12 @@ async function handleExcelChange(event: Event) {
   }
 
   try {
+    validateExcelUpload(file);
     const buffer = await file.arrayBuffer();
     const workbook = XLSX.read(buffer, { type: "array" });
     const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(firstSheet, { defval: "" });
-    const items = rows
-      .map((row) => ({
-        detail_url: String(row.detail_url ?? "").trim(),
-        code: String(row.code ?? "").trim(),
-        name: String(row.name ?? "").trim(),
-        keyword: String(row.keyword ?? "").trim() || "excel_upload",
-      }))
-      .filter((row) => row.detail_url);
+    const items = normalizeExcelRows(rows);
 
     if (items.length === 0) {
       throw new Error("Excel 文件中没有可用的 detail_url 列数据");

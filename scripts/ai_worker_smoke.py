@@ -81,6 +81,30 @@ def run_contract_examples():
     return examples
 
 
+def run_fake_flow():
+    """Exercise the Agent status contract without network, browser, or database."""
+
+    search_result = {
+        "summary": {"total": 1, "succeeded": 1, "failed": 0, "skipped": 0},
+        "errors": [],
+    }
+    download_result = {
+        "summary": {"total": 1, "succeeded": 1, "failed": 0, "skipped": 0},
+        "download_summary": {"pdf_saved": 1},
+        "errors": [],
+    }
+    return {
+        "search": {
+            "agent_status": build_agent_status("search_only", "succeeded", search_result, None),
+            "summary": search_result["summary"],
+        },
+        "download": {
+            "agent_status": build_agent_status("direct_grab", "succeeded", download_result, None),
+            "summary": download_result["summary"],
+        },
+    }
+
+
 def run_real_search(base_url, token, keyword, per_keyword_limit, timeout_seconds):
     payload = {
         "task_type": "search_only",
@@ -101,6 +125,7 @@ def main():
     parser.add_argument("--base-url", default="http://127.0.0.1:8765")
     parser.add_argument("--token", default=os.environ.get("STD_WORKER_API_TOKEN", ""))
     parser.add_argument("--real-search-keyword", default="")
+    parser.add_argument("--fake-flow", action="store_true", help="run the offline Agent contract flow")
     parser.add_argument("--per-keyword-limit", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=int, default=180)
     args = parser.parse_args()
@@ -109,6 +134,12 @@ def main():
         raise SystemExit("--token is required, or set STD_WORKER_API_TOKEN")
 
     report = {"base_url": args.base_url, "checks": {}}
+
+    if args.fake_flow:
+        report["checks"]["local_contract_examples"] = run_contract_examples()
+        report["checks"]["fake_flow"] = run_fake_flow()
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return
 
     status, body = request_json("GET", args.base_url, "/health", timeout=5)
     check(status == 200 and body == {"status": "ok"}, f"health failed: HTTP {status}: {body}")

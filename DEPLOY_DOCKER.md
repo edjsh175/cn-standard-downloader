@@ -102,6 +102,8 @@ cp .env.test.example .env.test
 - `STD_BIND_IP`
 - `STD_WORKER_PORT`
 - `STD_WORKER_API_TOKEN`
+- `STD_ALLOW_INSECURE_BROWSER_FLAGS`（默认 `false`；仅在明确的兼容性排障场景临时开启）
+- `STD_ALLOW_BROWSER_REMOTE_DEBUGGING`（默认 `false`；不要在公网暴露 9222）
 - `STD_ARTIFACTS_DIR`
 - `STD_TMP_DIR`
 - `STD_WEB_BASE_PATH`

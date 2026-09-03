@@ -44,6 +44,8 @@ DEFAULT_CONFIG = {
     "debug_dir": "debug_output",
     "remember_config": False,
     "headless_browser": False,
+    "allow_insecure_browser_flags": False,
+    "allow_browser_remote_debugging": False,
     "worker_host": "127.0.0.1",
     "worker_port": 8765,
     "worker_api_token": "",
@@ -64,6 +66,8 @@ ENV_CONFIG_MAP = {
     "STD_TEMP_DIR": "temp_dir",
     "STD_DEBUG_DIR": "debug_dir",
     "STD_HEADLESS_BROWSER": "headless_browser",
+    "STD_ALLOW_INSECURE_BROWSER_FLAGS": "allow_insecure_browser_flags",
+    "STD_ALLOW_BROWSER_REMOTE_DEBUGGING": "allow_browser_remote_debugging",
     "STD_WORKER_HOST": "worker_host",
     "STD_WORKER_PORT": "worker_port",
     "STD_WORKER_API_TOKEN": "worker_api_token",
@@ -73,7 +77,7 @@ ENV_CONFIG_MAP = {
 def _coerce_value(key: str, value: Any) -> Any:
     if key in {"db_port", "worker_port"}:
         return int(value)
-    if key in {"remember_config", "headless_browser"}:
+    if key in {"remember_config", "headless_browser", "allow_insecure_browser_flags", "allow_browser_remote_debugging"}:
         if isinstance(value, bool):
             return value
         return str(value).strip().lower() in {"1", "true", "yes", "on"}
@@ -196,6 +200,8 @@ CHAOJIYING_USER = ""
 CHAOJIYING_PASS = ""
 CHAOJIYING_SOFT_ID = ""
 HEADLESS_BROWSER = False
+ALLOW_INSECURE_BROWSER_FLAGS = False
+ALLOW_BROWSER_REMOTE_DEBUGGING = False
 WORKER_HOST = "127.0.0.1"
 WORKER_PORT = 8765
 WORKER_API_TOKEN = ""
@@ -241,6 +247,7 @@ def _sync_dependent_modules() -> None:
 def _recompute_runtime_fields() -> None:
     global INPUT_FILE, OUTPUT_FILE, BASE_PDF_DIR, TEMP_DIR, IMG_PATH, DEBUG_DIR
     global CHAOJIYING_USER, CHAOJIYING_PASS, CHAOJIYING_SOFT_ID, HEADLESS_BROWSER
+    global ALLOW_INSECURE_BROWSER_FLAGS, ALLOW_BROWSER_REMOTE_DEBUGGING
     global WORKER_HOST, WORKER_PORT, WORKER_API_TOKEN
 
     OUTPUT_FILE = str(user_config.get("output_file", DEFAULT_CONFIG["output_file"]))
@@ -265,6 +272,8 @@ def _recompute_runtime_fields() -> None:
     CHAOJIYING_PASS = str(user_config.get("chaojiying_pass", ""))
     CHAOJIYING_SOFT_ID = str(user_config.get("chaojiying_softid", ""))
     HEADLESS_BROWSER = bool(user_config.get("headless_browser", False))
+    ALLOW_INSECURE_BROWSER_FLAGS = bool(user_config.get("allow_insecure_browser_flags", False))
+    ALLOW_BROWSER_REMOTE_DEBUGGING = bool(user_config.get("allow_browser_remote_debugging", False))
     WORKER_HOST = str(user_config.get("worker_host", DEFAULT_CONFIG["worker_host"]))
     WORKER_PORT = int(user_config.get("worker_port", DEFAULT_CONFIG["worker_port"]))
     WORKER_API_TOKEN = str(user_config.get("worker_api_token", "")).strip()

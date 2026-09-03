@@ -58,13 +58,21 @@ class TaskStore:
             status VARCHAR(32) NOT NULL,
             table_name VARCHAR(255) NOT NULL,
             request_payload LONGTEXT NOT NULL,
+            idempotency_key VARCHAR(128) NULL,
             result_payload LONGTEXT NULL,
             error_message TEXT NULL,
             cancel_requested TINYINT(1) NOT NULL DEFAULT 0,
+            lease_owner VARCHAR(128) NULL,
+            lease_until DATETIME NULL,
+            heartbeat_at DATETIME NULL,
+            attempt_count INT NOT NULL DEFAULT 0,
+            timeout_seconds INT NULL,
+            priority INT NOT NULL DEFAULT 0,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             started_at DATETIME NULL,
             finished_at DATETIME NULL,
-            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_task_idempotency (idempotency_key)
         ) CHARACTER SET utf8mb4
         """
         items_sql = """
@@ -87,6 +95,31 @@ class TaskStore:
         with closing(self._connect()) as conn, closing(conn.cursor()) as cursor:
             cursor.execute(tasks_sql)
             cursor.execute(items_sql)
+            self._ensure_task_columns(cursor)
+
+    @staticmethod
+    def _ensure_task_columns(cursor):
+        """Add lifecycle columns to databases created before task leases existed."""
+
+        cursor.execute("SHOW COLUMNS FROM crawl_tasks")
+        existing = {row[0] for row in cursor.fetchall()}
+        definitions = {
+            "idempotency_key": "VARCHAR(128) NULL",
+            "lease_owner": "VARCHAR(128) NULL",
+            "lease_until": "DATETIME NULL",
+            "heartbeat_at": "DATETIME NULL",
+            "attempt_count": "INT NOT NULL DEFAULT 0",
+            "timeout_seconds": "INT NULL",
+            "priority": "INT NOT NULL DEFAULT 0",
+        }
+        for column, definition in definitions.items():
+            if column not in existing:
+                cursor.execute(f"ALTER TABLE crawl_tasks ADD COLUMN {column} {definition}")
+
+        cursor.execute("SHOW INDEX FROM crawl_tasks")
+        indexes = {row[2] for row in cursor.fetchall() if len(row) > 2}
+        if "uniq_task_idempotency" not in indexes:
+            cursor.execute("ALTER TABLE crawl_tasks ADD UNIQUE KEY uniq_task_idempotency (idempotency_key)")
 
     @staticmethod
     def _table_columns(cursor, table_name: str) -> set[str]:
@@ -112,6 +145,15 @@ class TaskStore:
                 )
 
     def create_task(self, task_type: str, payload: dict[str, Any]) -> str:
+        idempotency_key = str(payload.get("idempotency_key") or "").strip() or None
+        if idempotency_key:
+            sql = "SELECT id FROM crawl_tasks WHERE idempotency_key=%s LIMIT 1"
+            with closing(self._connect()) as conn, closing(conn.cursor()) as cursor:
+                cursor.execute(sql, (idempotency_key,))
+                row = cursor.fetchone()
+            if row:
+                return str(row[0])
+
         raw_table_name = str(payload.get("table_name") or "").strip()
         table_name = ""
         if task_type == "search_only":
@@ -123,14 +165,15 @@ class TaskStore:
             self.ensure_business_table(table_name)
         task_id = str(uuid.uuid4())
         sql = """
-        INSERT INTO crawl_tasks (id, task_type, status, table_name, request_payload)
-        VALUES (%s, %s, 'pending', %s, %s)
+        INSERT INTO crawl_tasks (id, task_type, status, table_name, request_payload, idempotency_key)
+        VALUES (%s, %s, 'pending', %s, %s, %s)
         """
         params = (
             task_id,
             task_type,
             table_name,
             self._dumps(payload),
+            idempotency_key,
         )
         with closing(self._connect()) as conn, closing(conn.cursor()) as cursor:
             cursor.execute(sql, params)
@@ -152,6 +195,69 @@ class TaskStore:
         """
         with closing(self._connect()) as conn, closing(conn.cursor()) as cursor:
             cursor.execute(sql, (task_id,))
+
+    def claim_task(self, task_id: str, lease_owner: str, lease_seconds: int = 300) -> bool:
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        sql = """
+        UPDATE crawl_tasks
+        SET status='running',
+            started_at=COALESCE(started_at, NOW()),
+            heartbeat_at=NOW(),
+            lease_owner=%s,
+            lease_until=DATE_ADD(NOW(), INTERVAL %s SECOND),
+            attempt_count=attempt_count+1
+        WHERE id=%s
+          AND status IN ('pending', 'queued')
+          AND cancel_requested=0
+          AND (lease_until IS NULL OR lease_until < NOW())
+        """
+        with closing(self._connect()) as conn, closing(conn.cursor()) as cursor:
+            cursor.execute(sql, (lease_owner, lease_seconds, task_id))
+            return cursor.rowcount == 1
+
+    def heartbeat_task(self, task_id: str, lease_owner: str, lease_seconds: int = 300) -> bool:
+        if lease_seconds <= 0:
+            raise ValueError("lease_seconds must be positive")
+        sql = """
+        UPDATE crawl_tasks
+        SET heartbeat_at=NOW(), lease_until=DATE_ADD(NOW(), INTERVAL %s SECOND)
+        WHERE id=%s AND status='running' AND lease_owner=%s
+        """
+        with closing(self._connect()) as conn, closing(conn.cursor()) as cursor:
+            cursor.execute(sql, (lease_seconds, task_id, lease_owner))
+            return cursor.rowcount == 1
+
+    def release_lease(self, task_id: str, lease_owner: str | None = None):
+        sql = """
+        UPDATE crawl_tasks
+        SET lease_owner=NULL, lease_until=NULL, heartbeat_at=NULL
+        WHERE id=%s AND (%s IS NULL OR lease_owner=%s)
+        """
+        with closing(self._connect()) as conn, closing(conn.cursor()) as cursor:
+            cursor.execute(sql, (task_id, lease_owner, lease_owner))
+
+    def recover_expired_tasks(self) -> int:
+        sql = """
+        UPDATE crawl_tasks
+        SET status='pending', lease_owner=NULL, lease_until=NULL, heartbeat_at=NULL
+        WHERE status='running' AND lease_until IS NOT NULL AND lease_until < NOW()
+        """
+        with closing(self._connect()) as conn, closing(conn.cursor()) as cursor:
+            cursor.execute(sql)
+            return cursor.rowcount
+
+    def list_runnable_task_ids(self) -> list[str]:
+        sql = """
+        SELECT id
+        FROM crawl_tasks
+        WHERE status IN ('pending', 'queued') AND cancel_requested=0
+        ORDER BY priority DESC, created_at ASC
+        """
+        with closing(self._connect()) as conn, closing(conn.cursor(pymysql.cursors.DictCursor)) as cursor:
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+        return [str(row["id"] if isinstance(row, dict) else row[0]) for row in rows]
 
     def mark_succeeded(self, task_id: str, result_payload: dict[str, Any]):
         sql = """

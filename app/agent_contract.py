@@ -2,26 +2,22 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.errors import ERROR_CATALOG
+from app.task_state import TERMINAL_STATE_ORDER, TERMINAL_STATES as TASK_TERMINAL_STATES
+from app.tool_contract import get_tool_contract
+
 
 API_VERSION = "2026-05-28"
 TASK_TYPES = ["search_only", "direct_grab", "keyword_search"]
-TERMINAL_STATES = ["succeeded", "failed", "partial_failed", "cancelled"]
+TERMINAL_STATES = list(TERMINAL_STATE_ORDER)
 ARTIFACT_NAMES = ["search_results", "failed_results", "log_file"]
 RECOMMENDED_WORKFLOW = ["search_only", "direct_grab"]
 
-ERROR_RETRYABLE = {
-    "CAPTCHA_NO_BALANCE": True,
-    "CAPTCHA_FAILED": True,
-    "NO_PUBLIC_TEXT": False,
-    "PDF_DOWNLOAD_FAILED": True,
-    "DB_WRITE_FAILED": False,
-    "SITE_TIMEOUT": True,
-    "INVALID_INPUT": False,
-    "UNKNOWN_ERROR": True,
-}
+ERROR_RETRYABLE = {code: bool(spec["retryable"]) for code, spec in ERROR_CATALOG.items()}
 
 
 def get_capabilities() -> dict[str, Any]:
+    contract = get_tool_contract()
     return {
         "api_version": API_VERSION,
         "task_types": list(TASK_TYPES),
@@ -30,6 +26,11 @@ def get_capabilities() -> dict[str, Any]:
         "recommended_workflow": list(RECOMMENDED_WORKFLOW),
         "recommended_poll_interval_seconds": 2,
         "auth": {"scheme": "bearer"},
+        "contract_version": contract["contract_version"],
+        "tools": contract["tools"],
+        "limits": contract["limits"],
+        "error_catalog": contract["error_catalog"],
+        "artifact_schema": contract["artifact_schema"],
     }
 
 
@@ -76,9 +77,11 @@ def annotate_errors(errors: list[dict[str, Any]] | None) -> list[dict[str, Any]]
     annotated = []
     for error in errors or []:
         row = dict(error)
-        error_code = classify_error_code(row.get("message"), row.get("error_type"))
+        explicit_code = _text(row.get("error_code"))
+        error_code = explicit_code if explicit_code in ERROR_CATALOG else classify_error_code(row.get("message"), row.get("error_type"))
         row["error_code"] = error_code
         row["retryable"] = _retryable(error_code)
+        row["category"] = ERROR_CATALOG.get(error_code, ERROR_CATALOG["UNKNOWN_ERROR"])["category"]
         annotated.append(row)
     return annotated
 
@@ -139,7 +142,7 @@ def build_agent_status(
     error_message: str | None,
 ) -> dict[str, Any]:
     lifecycle = _text(status) or "unknown"
-    terminal = lifecycle in TERMINAL_STATES
+    terminal = lifecycle in TASK_TERMINAL_STATES
 
     if not terminal:
         return {

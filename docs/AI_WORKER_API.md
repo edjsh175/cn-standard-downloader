@@ -13,6 +13,25 @@
 - 下载 artifact：`GET /api/tasks/{task_id}/artifacts/{artifact_name}`
 - 下载 PDF：`GET /api/tasks/{task_id}/items/{item_id}/pdf`
 
+## Agent Tool Contract
+
+`GET /api/capabilities` 返回 `contract_version` 为 `1.0.0` 的机器可读工具契约。当前工具与底层 API 的映射为：
+
+| Agent tool | API | 作用 |
+| --- | --- | --- |
+| `search_standards` | `POST /api/tasks`，`task_type=search_only` | 搜索候选标准 |
+| `download_standards` | `POST /api/tasks`，`task_type=direct_grab` | 下载选中的标准资料 |
+| `get_task_status` | `GET /api/tasks/{task_id}` | 查询生命周期和下一步动作 |
+| `get_task_result` | `GET /api/tasks/{task_id}/result` | 获取条目结果、错误和产物 |
+| `cancel_task` | `POST /api/tasks/{task_id}/cancel` | 请求取消任务 |
+| `get_artifact` | `GET /api/tasks/{task_id}/artifacts/{artifact_name}` | 下载受控产物 |
+
+创建任务时可传入 `idempotency_key`（最多 128 个字符）。同一 key 在服务端只对应一个任务，适合 Agent 在请求超时后安全重试。任务结果中的错误包含稳定的 `error_code`、`category` 和 `retryable`，调用方不应依赖自然语言 message 判断是否重试。
+
+产物引用通过 `artifact_urls` 返回，文件完整性通过 `artifact_metadata` 返回，包括 `content_type`、`size_bytes`、`sha256` 和 `created_at`；API 响应不会把服务器本地绝对路径作为公开字段返回。
+
+下载任务结果还会包含 `run_evidence`，记录整体耗时以及 `search`、`prepare_items`、`download`、`finalize` 阶段耗时和条目计数，便于 Agent 或调用方定位慢点与部分失败发生的阶段。
+
 除健康检查和 Web 静态页面外，API 请求都需要：
 
 ```http
@@ -126,6 +145,14 @@ Authorization: Bearer <STD_WORKER_API_TOKEN>
 - `/api/capabilities` 无 token 返回 `401`。
 - `/api/capabilities` 带 token 返回 contract 元数据。
 - 本地 contract 示例能正确映射 search/direct/captcha 场景。
+
+不启动 worker、不访问网络即可运行完整的离线契约演示：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\ai_worker_smoke.py --token test-worker-token --fake-flow
+```
+
+该模式覆盖搜索结果可用、下载成功和验证码阻塞三类 Agent 可见结果。
 
 真实搜索必须显式启用：
 
