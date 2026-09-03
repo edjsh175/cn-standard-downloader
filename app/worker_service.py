@@ -25,12 +25,15 @@ from utils import extract_detail_urls_from_text, normalize_detail_url
 class TaskWorkerService:
     def __init__(self):
         self.task_store = TaskStore()
-        self.pipeline = PipelineRunner(self.task_store)
         self.task_queue = queue.Queue()
         self.worker_id = f"{socket.gethostname()}:{os.getpid()}"
+        self.pipeline = PipelineRunner(self.task_store, heartbeat_callback=self._heartbeat_task)
         self.task_store.recover_expired_tasks()
         for task_id in self.task_store.list_runnable_task_ids():
             self.task_queue.put(task_id)
+
+    def _heartbeat_task(self, task_id: str):
+        self.task_store.heartbeat_task(task_id, self.worker_id)
 
     @staticmethod
     def _normalize_per_keyword_limit(value):

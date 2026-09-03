@@ -16,6 +16,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from app.db_utils import validate_table_name
+from app.agent_contract import classify_error_code
 from app.scrapling_parser import parse_detail_meta
 from config import (
     BASE_PDF_DIR,
@@ -616,6 +617,7 @@ class BatchCrawler:
             "name": row.get("name"),
             "fail_reason": fail_reason,
             "error_type": self._classify_error(fail_reason),
+            "error_code": classify_error_code(fail_reason),
             "execution_time": time.strftime("%Y-%m-%d %H:%M:%S"),
             "keyword": row.get("keyword"),
             "standard_type": row.get("type", "unknown"),

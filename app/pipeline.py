@@ -1,5 +1,5 @@
 import os
-from typing import Any
+from typing import Any, Callable
 
 import config
 from grab_module import BatchCrawler
@@ -16,11 +16,17 @@ class PipelineRunner:
         search_executor: SearchExecutor | None = None,
         crawler_factory: CrawlerFactory | None = None,
         excel_writer: ExcelWriter | None = None,
+        heartbeat_callback: Callable[[str], None] | None = None,
     ):
         self.task_store = task_store
         self.search_executor = search_executor or search_standards_with_output
         self.crawler_factory = crawler_factory or BatchCrawler
         self.excel_writer = excel_writer or write_excel
+        self.heartbeat_callback = heartbeat_callback
+
+    def _heartbeat(self, task_id: str):
+        if self.heartbeat_callback is not None:
+            self.heartbeat_callback(task_id)
 
     def _artifact_root(self, task_id: str) -> str:
         return os.path.join(config.get_base_dir(), "artifacts", "tasks", task_id)
@@ -234,6 +240,7 @@ class PipelineRunner:
         evidence = RunEvidence()
 
         self._check_cancelled(task_id)
+        self._heartbeat(task_id)
         if task_type in {"keyword_search", "search_only"}:
             phase_started = evidence.begin()
             try:
@@ -368,6 +375,7 @@ class PipelineRunner:
         failed_artifact_name = None
         crawl_result = None
         try:
+            self._heartbeat(task_id)
             phase_started = evidence.begin()
             crawl_result = crawler.run(
                 search_output,
@@ -390,6 +398,7 @@ class PipelineRunner:
             self._finalize_task_items(task_id, items, saved_results, crawler.processed_results, crawler.failed_items)
             raise
 
+        self._heartbeat(task_id)
         phase_started = evidence.begin()
         success_count, failure_count, write_counts, errors = self._finalize_task_items(
             task_id,

@@ -35,6 +35,7 @@ class AgentToolFlowTests(unittest.TestCase):
             "request_payload": {"keywords": ["人工智能"], "per_keyword_limit": 1},
         }
         store = FakePipelineStore(task)
+        heartbeat_calls = []
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(
             config, "get_base_dir", return_value=temp_dir
         ), patch.object(config, "update_config"), patch("app.pipeline.os.chdir", side_effect=AssertionError("pipeline must not change process cwd")):
@@ -52,6 +53,7 @@ class AgentToolFlowTests(unittest.TestCase):
                     ]
                 ),
                 crawler_factory=FakeCrawlerFactory(),
+                heartbeat_callback=lambda task_id: heartbeat_calls.append(task_id),
             )
 
             result = runner.execute("search-task")
@@ -59,6 +61,8 @@ class AgentToolFlowTests(unittest.TestCase):
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(result["summary"]["total"], 1)
         self.assertEqual(store.items[0]["code"], "GB/T 1-2020")
+        self.assertGreaterEqual(len(heartbeat_calls), 1)
+        self.assertTrue(all(task_id == "search-task" for task_id in heartbeat_calls))
         self.assertIn("run_evidence", result)
         self.assertIn("search", result["run_evidence"]["phases"])
         self.assertGreaterEqual(result["run_evidence"]["phases"]["search"]["duration_ms"], 0)
